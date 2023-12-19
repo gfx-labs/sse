@@ -2,7 +2,11 @@
 
 this is a fork of https://github.com/r3labs/sse
 
-it has a few optimizations, removes some code i feel is not important, etc.
+it's very different.
+
+i aim to implement https://html.spec.whatwg.org/multipage/server-sent-events.html
+
+
 
 # original readme
 

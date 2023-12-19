@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"gopkg.in/cenkalti/backoff.v1"
@@ -45,12 +44,12 @@ type Client struct {
 	disconnectcb      ConnCallback
 	connectedcb       ConnCallback
 	subscribed        map[chan *Event]chan struct{}
-	Headers           map[string]string
+	Fields           map[string]string
 	ReconnectNotify   backoff.Notify
 	ResponseValidator ResponseValidator
 	Connection        *http.Client
 	URL               string
-	LastEventID       atomic.Value // []byte
+	LastEventID       atomicByteSlice
 	maxBufferSize     int
 	mu                sync.Mutex
 	EncodingBase64    bool
@@ -62,7 +61,7 @@ func NewClient(url string, opts ...func(c *Client)) *Client {
 	c := &Client{
 		URL:           url,
 		Connection:    &http.Client{},
-		Headers:       make(map[string]string),
+		Fields:       make(map[string]string),
 		subscribed:    make(map[chan *Event]chan struct{}),
 		maxBufferSize: 1 << 16,
 	}
@@ -234,10 +233,15 @@ func (c *Client) readLoop(reader *EventStreamReader, outCh chan *Event, erChan c
 		// If we get an error, ignore it.
 		var msg *Event
 		if msg, err = c.processEvent(event); err == nil {
-			if len(msg.ID) > 0 {
-				c.LastEventID.Store(msg.ID)
+			if msg.ID != nil && len(*msg.ID) > 0 {
+				c.LastEventID.Store(*msg.ID)
 			} else {
-				msg.ID, _ = c.LastEventID.Load().([]byte)
+				bts, ok := c.LastEventID.Load()
+				if !ok {
+					msg.ID = nil
+				} else {
+					msg.ID = &bts
+				}
 			}
 
 			// Send downstream if the event has something useful
@@ -302,18 +306,18 @@ func (c *Client) request(ctx context.Context, stream string) (*http.Response, er
 		req.URL.RawQuery = query.Encode()
 	}
 
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Connection", "keep-alive")
+	req.Field.Set("Cache-Control", "no-cache")
+	req.Field.Set("Accept", "text/event-stream")
+	req.Field.Set("Connection", "keep-alive")
 
-	lastID, exists := c.LastEventID.Load().([]byte)
-	if exists && lastID != nil {
-		req.Header.Set("Last-Event-ID", string(lastID))
+	lastID, exists := c.LastEventID.Load()
+	if exists && len(lastID) > 0 {
+		req.Field.Set("Last-Event-ID", string(lastID))
 	}
 
 	// Add user specified headers
-	for k, v := range c.Headers {
-		req.Header.Set(k, v)
+	for k, v := range c.Fields {
+		req.Field.Set(k, v)
 	}
 
 	return c.Connection.Do(req)
@@ -326,38 +330,56 @@ func (c *Client) processEvent(msg []byte) (event *Event, err error) {
 		return nil, errors.New("event message was empty")
 	}
 
+	buf := &bytes.Buffer{}
+	e.Data = buf
+
 	// Normalize the crlf to lf to make it easier to split the lines.
 	// Split the line by "\n" or "\r", per the spec.
 	for _, line := range bytes.FieldsFunc(msg, func(r rune) bool { return r == '\n' || r == '\r' }) {
 		switch {
 		case bytes.HasPrefix(line, headerID):
-			e.ID = append([]byte(nil), trimHeader(len(headerID), line)...)
+			idBytes := append([]byte(nil), trimField(len(headerID), line)...)
+			e.ID = &idBytes
 		case bytes.HasPrefix(line, headerData):
 			// The spec allows for multiple data fields per event, concatenated them with "\n".
-			e.Data = append(e.Data[:], append(trimHeader(len(headerData), line), byte('\n'))...)
+			buf.Write(append(trimField(len(headerData), line), byte('\n')))
 		// The spec says that a line that simply contains the string "data" should be treated as a data field with an empty body.
 		case bytes.Equal(line, bytes.TrimSuffix(headerData, []byte(":"))):
-			e.Data = append(e.Data, byte('\n'))
+			buf.WriteRune('\n')
 		case bytes.HasPrefix(line, headerEvent):
-			e.Event = append([]byte(nil), trimHeader(len(headerEvent), line)...)
+			e.Event = trimField(len(headerEvent), line)
 		case bytes.HasPrefix(line, headerRetry):
-			e.Retry = append([]byte(nil), trimHeader(len(headerRetry), line)...)
+			if e.Fields == nil {
+				e.Fields = make(map[string][]byte)
+			}
+			e.Fields["retry"] = trimField(len(headerEvent), line)
 		default:
-			// Ignore any garbage that doesn't match what we're looking for.
+			// this is a custom header. extract it from the stream
+			splt := bytes.SplitN(line, []byte(":"), 2)
+			var header []byte
+			var topic []byte
+			header = splt[0]
+			if len(splt) == 2 {
+				topic = bytes.TrimSpace(splt[1])
+			}
+			e.Fields[string(header)] = topic
 		}
 	}
 
 	// Trim the last "\n" per the spec.
-	e.Data = bytes.TrimSuffix(e.Data, []byte("\n"))
+	if buf.Len() > 0 {
+		if buf.Bytes()[buf.Len()-1] == '\n' {
+			buf.Truncate(buf.Len() - 1)
+		}
+	}
 
 	if c.EncodingBase64 {
-		buf := make([]byte, base64.StdEncoding.DecodedLen(len(e.Data)))
-
-		n, err := base64.StdEncoding.Decode(buf, e.Data)
+		decodedBuf := make([]byte, base64.StdEncoding.DecodedLen(buf.Len()))
+		n, err := base64.StdEncoding.Decode(decodedBuf, buf.Bytes())
 		if err != nil {
 			err = fmt.Errorf("failed to decode event message: %s", err)
 		}
-		e.Data = buf[:n]
+		e.Data = bytes.NewBuffer(decodedBuf[:n])
 	}
 	return &e, err
 }
@@ -372,7 +394,7 @@ func (c *Client) cleanup(ch chan *Event) {
 	}
 }
 
-func trimHeader(size int, data []byte) []byte {
+func trimField(size int, data []byte) []byte {
 	if data == nil || len(data) < size {
 		return data
 	}

@@ -69,7 +69,7 @@ func newServer401() *Server {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
+		w.WriteField(http.StatusUnauthorized)
 	})
 
 	server = httptest.NewServer(mux)
@@ -375,7 +375,7 @@ func TestClientComment(t *testing.T) {
 	c.Unsubscribe(events)
 }
 
-func TestTrimHeader(t *testing.T) {
+func TestTrimField(t *testing.T) {
 	tests := []struct {
 		input []byte
 		want  []byte
@@ -395,7 +395,7 @@ func TestTrimHeader(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := trimHeader(len(headerData), tc.input)
+		got := trimField(len(headerData), tc.input)
 		require.Equal(t, tc.want, got)
 	}
 }

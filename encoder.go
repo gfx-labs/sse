@@ -1,0 +1,60 @@
+package sse
+
+import "io"
+
+func ID(x string) *[]byte {
+	xb := []byte(x)
+	return &xb
+}
+
+// Encoder works at a higher level than the encoder.
+// it works on the packet level.
+type Encoder struct {
+	wr *Writer
+
+	firstWriteDone bool
+}
+
+func NewEncoder(w io.Writer) *Encoder {
+	wr := NewWriter(w)
+	return &Encoder{
+		wr: wr,
+	}
+}
+
+func (e *Encoder) Encode(p *Event) error {
+	if e.firstWriteDone {
+		err := e.wr.Next()
+		if err != nil {
+			return err
+		}
+	}
+	e.firstWriteDone = true
+	if len(p.Event) > 0 {
+		if err := e.wr.Field([]byte("event"), p.Event); err != nil {
+			return err
+		}
+	}
+	if p.Fields != nil {
+		for k, v := range p.Fields {
+			if err := e.wr.Field([]byte(k), v); err != nil {
+				return err
+			}
+		}
+	}
+	if p.Data != nil {
+		if _, err := e.wr.ReadFrom(p.Data); err != nil {
+			return err
+		}
+	}
+	err := e.wr.Flush()
+	if err != nil {
+		return err
+	}
+	if p.ID != nil {
+		if err := e.wr.Field([]byte("id"), *p.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
