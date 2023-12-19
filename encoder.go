@@ -1,6 +1,8 @@
 package sse
 
-import "io"
+import (
+	"io"
+)
 
 func ID(x string) *[]byte {
 	xb := []byte(x)
@@ -47,6 +49,7 @@ func (e *Encoder) Encode(p *Event) error {
 			return err
 		}
 	}
+	// flush the end of data to make sure we are safe to write an id
 	err := e.wr.Flush()
 	if err != nil {
 		return err
@@ -55,6 +58,10 @@ func (e *Encoder) Encode(p *Event) error {
 		if err := e.wr.Field([]byte("id"), *p.ID); err != nil {
 			return err
 		}
+	}
+	err = e.wr.Next()
+	if err != nil {
+		return err
 	}
 	return nil
 }

@@ -61,26 +61,29 @@ type readerState struct {
 // The reader is more like a lexer :p
 // it is not thread safe.
 type Reader struct {
-	r            *bufio.Reader
-	maxTokenSize int
-	rs           readerState
-	readBuf      []byte
+	r       *bufio.Reader
+	rs      readerState
+	readBuf []byte
 
 	cur      bytes.Buffer
 	leftover bytes.Buffer
+	o        Options
 }
 
-func NewReader(r io.Reader, maxBufferSize int) *Reader {
+func NewReader(r io.Reader, opts ...Option) *Reader {
+	o := &Options{}
+	for _, v := range opts {
+		v(o)
+	}
 	return &Reader{
-		r:            bufio.NewReader(r),
-		maxTokenSize: maxBufferSize,
-		readBuf:      make([]byte, 4096),
+		r:       bufio.NewReader(r),
+		readBuf: make([]byte, 4096),
+		o:       *o,
 	}
 }
 
 // returns the current token
 func (r *Reader) Token() *Token {
-
 	return r.rs.tok
 }
 
@@ -88,8 +91,8 @@ func (r *Reader) Token() *Token {
 func (r *Reader) Next() error {
 	r.rs.tok = nil
 	rd := r.r
-	if r.maxTokenSize > 0 {
-		allowedToRead := r.maxTokenSize - r.cur.Len()
+	if r.o.MaxBufferSize() > 0 {
+		allowedToRead := r.o.MaxBufferSize() - r.cur.Len()
 		if allowedToRead <= 0 {
 			return io.EOF
 		}
@@ -188,5 +191,4 @@ func (r *Reader) Next() error {
 			return nil
 		}
 	}
-
 }

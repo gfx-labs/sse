@@ -44,7 +44,7 @@ data: friend
 	for d, v := range cases {
 		require.Equalf(t, len(v.tokens), len(v.lines), "bad test case: %d", d)
 		buf := strings.NewReader(v.dat)
-		enc := NewReader(buf, -1)
+		enc := NewReader(buf)
 		idx := 0
 		for enc.Next() == nil {
 			tok := enc.Token()

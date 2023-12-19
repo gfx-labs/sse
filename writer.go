@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"bytes"
 	"io"
 	"unicode/utf8"
 	//"github.com/segmentio/asm/utf8" -- can switch to this library in the future if needed
@@ -67,9 +68,6 @@ func (e *Writer) Next() error {
 
 // Event will start writing an event `name: topic` to the stream
 func (e *Writer) Field(name []byte, topic []byte) error {
-	if len(topic) == 0 {
-		return nil
-	}
 	if e.o.ValidateUTF8() {
 		if !utf8.Valid(topic) {
 			return ErrInvalidUTF8Bytes
@@ -86,6 +84,12 @@ func (e *Writer) Field(name []byte, topic []byte) error {
 		if _, err := e.w.Write(topic); err != nil {
 			return err
 		}
+	} else if bytes.Equal([]byte("id"), name) {
+		if _, err := e.w.Write(name); err != nil {
+			return err
+		}
+	} else {
+		return nil
 	}
 	if err := e.writeByte('\n'); err != nil {
 		return err
