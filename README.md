@@ -1,3 +1,11 @@
+# sse
+
+this is a fork of https://github.com/r3labs/sse
+
+it has a few optimizations, removes some code i feel is not important, etc.
+
+# original readme
+
 # SSE - Server Sent Events Client/Server Library for Go
 
 ## Synopsis
