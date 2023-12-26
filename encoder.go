@@ -13,8 +13,6 @@ func ID(x string) *[]byte {
 // it works on the packet level.
 type Encoder struct {
 	wr *Writer
-
-	firstWriteDone bool
 }
 
 func NewEncoder(w io.Writer) *Encoder {
@@ -25,7 +23,6 @@ func NewEncoder(w io.Writer) *Encoder {
 }
 
 func (e *Encoder) Encode(p *Event) error {
-	e.firstWriteDone = true
 	if len(p.Event) > 0 {
 		if err := e.wr.Field([]byte("event"), p.Event); err != nil {
 			return err
@@ -53,7 +50,7 @@ func (e *Encoder) Encode(p *Event) error {
 			return err
 		}
 	}
-	if err := e.wr.writeByte('\n'); err != nil {
+	if err := e.wr.Next(); err != nil {
 		return err
 	}
 

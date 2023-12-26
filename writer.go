@@ -42,19 +42,20 @@ func (e *Writer) writeByte(x byte) error {
 
 func (e *Writer) Flush() error {
 	if e.es.inMessage {
-		e.es.inMessage = false
-		e.es.trailingCarriage = false
 		// we are in a message, so write a newline to terminate it, as the user did not
 		err := e.writeByte('\n')
 		if err != nil {
 			return err
 		}
+		e.es.inMessage = false
+		e.es.trailingCarriage = false
 	}
 	if e.es.trailingCarriage {
 		err := e.writeByte('\n')
 		if err != nil {
 			return err
 		}
+		e.es.trailingCarriage = false
 	}
 	return nil
 }
