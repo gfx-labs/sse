@@ -19,14 +19,13 @@ func TestEncoderSimple(t *testing.T) {
 			{Event: []byte("hello"), Data: strings.NewReader("some data")},
 			{Data: strings.NewReader("some other data with no event header")},
 		},
-		"event: hello\ndata: some data\n\ndata: some other data with no event header\n",
+		"event: hello\ndata: some data\n\ndata: some other data with no event header\n\n",
 	},
 		{
 			[]*Event{
 				{Event: []byte("hello"), Data: strings.NewReader("some \n funky\r\n data\r")},
 				{Data: strings.NewReader("some other data with an id"), ID: ID("dogs")},
-			},
-			"event: hello\ndata: some \ndata:  funky\r\ndata:  data\r\ndata: some other data with an id\nid: dogs\n",
+			}, "event: hello\ndata: some \ndata:  funky\r\ndata:  data\r\n\ndata: some other data with an id\nid: dogs\n\n",
 		},
 	}
 	for _, v := range cases {

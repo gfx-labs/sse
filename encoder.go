@@ -25,12 +25,6 @@ func NewEncoder(w io.Writer) *Encoder {
 }
 
 func (e *Encoder) Encode(p *Event) error {
-	if e.firstWriteDone {
-		err := e.wr.Next()
-		if err != nil {
-			return err
-		}
-	}
 	e.firstWriteDone = true
 	if len(p.Event) > 0 {
 		if err := e.wr.Field([]byte("event"), p.Event); err != nil {
@@ -59,9 +53,9 @@ func (e *Encoder) Encode(p *Event) error {
 			return err
 		}
 	}
-	err = e.wr.Next()
-	if err != nil {
+	if err := e.wr.writeByte('\n'); err != nil {
 		return err
 	}
+
 	return nil
 }
