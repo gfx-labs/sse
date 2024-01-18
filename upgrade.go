@@ -49,6 +49,11 @@ func (u *Upgrader) Upgrade(wr http.ResponseWriter, r *http.Request) (*EventSink,
 }
 
 func (e *EventSink) Encode(p *Event) error {
+	select {
+	case <-e.r.Context().Done():
+		return e.r.Context().Err()
+	default:
+	}
 	err := e.enc.Encode(p)
 	if err != nil {
 		return err
