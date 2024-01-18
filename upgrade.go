@@ -53,6 +53,7 @@ func (e *EventSink) Encode(p *Event) error {
 	if err != nil {
 		return err
 	}
+	e.bw.Flush()
 	e.flusher.Flush()
 	return nil
 }
