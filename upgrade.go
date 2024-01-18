@@ -1,7 +1,6 @@
 package sse
 
 import (
-	"bufio"
 	"net/http"
 )
 
@@ -10,7 +9,6 @@ import (
 type EventSink struct {
 	wr      http.ResponseWriter
 	r       *http.Request
-	bw      *bufio.Writer
 	enc     *Encoder
 	flusher http.Flusher
 
@@ -34,7 +32,6 @@ func (u *Upgrader) Upgrade(wr http.ResponseWriter, r *http.Request) (*EventSink,
 	o := &EventSink{
 		wr: wr,
 		r:  r,
-		bw: bufio.NewWriter(wr),
 	}
 	o.LastEventId = r.Header.Get("Last-Event-ID")
 
@@ -58,7 +55,6 @@ func (e *EventSink) Encode(p *Event) error {
 	if err != nil {
 		return err
 	}
-	e.bw.Flush()
 	e.flusher.Flush()
 	return nil
 }
