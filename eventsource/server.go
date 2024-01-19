@@ -17,6 +17,8 @@ type sub struct {
 	mu     sync.Mutex
 }
 
+// Server is an example of how a server could be built around the sse package.
+// it is purposefully not very customizable
 type Server struct {
 	upgrader *sse.Upgrader
 
