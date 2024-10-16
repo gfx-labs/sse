@@ -3,7 +3,7 @@ module github.com/gfx-labs/sse
 go 1.18
 
 require (
-	github.com/stretchr/testify v1.8.4
+	github.com/stretchr/testify v1.9.0
 	github.com/tidwall/btree v1.7.0
 	gopkg.in/cenkalti/backoff.v1 v1.1.0
 )

@@ -6,9 +6,8 @@ import (
 )
 
 type savedMessage struct {
-	shell   sse.Event
-	payload []byte
-	id      int
+	shell sse.Event
+	id    int
 }
 
 func byId(a, b *savedMessage) bool {

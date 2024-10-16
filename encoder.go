@@ -36,7 +36,7 @@ func (e *Encoder) Encode(p *Event) error {
 		}
 	}
 	if p.Data != nil {
-		if _, err := e.wr.ReadFrom(p.Data); err != nil {
+		if _, err := e.wr.Write(p.Data); err != nil {
 			return err
 		}
 	}

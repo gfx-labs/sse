@@ -1,8 +1,6 @@
 package eventsource
 
 import (
-	"bytes"
-	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -62,7 +60,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		delete(s.subs, id)
 		s.mu.Unlock()
 	}()
-
+	s.broadcast()
 	for {
 		select {
 		case <-r.Context().Done():
@@ -82,18 +80,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Encode(p *sse.Event) error {
-	data, err := io.ReadAll(p.Data)
-	if err != nil {
-		return err
-	}
 	// now take the payload and put it with the shell
-	p.Data = nil
 	sm := &savedMessage{
-		shell:   *p,
-		payload: data,
-		id:      int(s.currentId.Add(1)),
+		shell: *p,
+		id:    int(s.currentId.Add(1)),
 	}
 	s.elog.events.Set(sm)
+	s.broadcast()
 	return nil
 }
 
@@ -116,7 +109,6 @@ func (s *Server) broadcast() {
 			if curId == 0 {
 				if currentValue, ok := s.elog.events.Max(); ok {
 					msg := currentValue.shell
-					msg.Data = bytes.NewBuffer(currentValue.payload)
 					select {
 					case v.msgs <- &msg:
 						v.lastid = currentValue.id
@@ -131,8 +123,10 @@ func (s *Server) broadcast() {
 			s.elog.events.Ascend(&savedMessage{
 				id: curId,
 			}, func(currentValue *savedMessage) bool {
+				if currentValue.id == curId {
+					return true
+				}
 				msg := currentValue.shell
-				msg.Data = bytes.NewBuffer(currentValue.payload)
 				select {
 				case v.msgs <- &msg:
 					v.lastid = currentValue.id

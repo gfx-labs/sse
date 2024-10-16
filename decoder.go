@@ -20,7 +20,9 @@ func (d *Decoder) Decode(e *Event) error {
 		panic("cannot pass nil event into (*sse.Decoder).Decode")
 	}
 	buf := &bytes.Buffer{}
-	e.Data = buf
+	defer func() {
+		e.Data = buf.Bytes()
+	}()
 	for {
 		err := d.r.Next()
 		if err != nil {

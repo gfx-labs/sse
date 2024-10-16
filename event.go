@@ -1,8 +1,6 @@
 package sse
 
 import (
-	"bytes"
-	"io"
 	"time"
 )
 
@@ -11,7 +9,7 @@ type Event struct {
 	timestamp time.Time
 	Event     []byte
 	ID        *[]byte
-	Data      io.Reader
+	Data      []byte
 
 	Fields   map[string][]byte
 	Comments [][]byte
@@ -25,11 +23,7 @@ func (e *Event) reset() {
 	e.timestamp = time.Time{}
 	e.Event = e.Event[:0]
 	e.ID = nil
-	if val, ok := e.Data.(*bytes.Buffer); ok {
-		val.Reset()
-	} else {
-		val = nil
-	}
+	e.Data = e.Data[:0]
 	for k := range e.Fields {
 		delete(e.Fields, k)
 	}

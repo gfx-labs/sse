@@ -2,7 +2,6 @@ package sse
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,15 +15,15 @@ func TestEncoderSimple(t *testing.T) {
 	}
 	cases := []testCase{{
 		[]*Event{
-			{Event: []byte("hello"), Data: strings.NewReader("some data")},
-			{Data: strings.NewReader("some other data with no event header")},
+			{Event: []byte("hello"), Data: []byte("some data")},
+			{Data: []byte("some other data with no event header")},
 		},
 		"event: hello\ndata: some data\n\ndata: some other data with no event header\n\n",
 	},
 		{
 			[]*Event{
-				{Event: []byte("hello"), Data: strings.NewReader("some \n funky\r\n data\r")},
-				{Data: strings.NewReader("some other data with an id"), ID: ID("dogs")},
+				{Event: []byte("hello"), Data: []byte("some \n funky\r\n data\r")},
+				{Data: []byte("some other data with an id"), ID: ID("dogs")},
 			}, "event: hello\ndata: some \ndata:  funky\r\ndata:  data\r\n\ndata: some other data with an id\nid: dogs\n\n",
 		},
 	}

@@ -1,9 +1,7 @@
 package sse_test
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -35,7 +33,7 @@ func TestClientBasic(t *testing.T) {
 		for i := 0; i < 5; i++ {
 			payload := strconv.Itoa(i)
 			err = sink.Encode(&sse.Event{
-				Data: bytes.NewBuffer([]byte(payload)),
+				Data: []byte(payload),
 			})
 		}
 	})
@@ -49,8 +47,7 @@ func TestClientBasic(t *testing.T) {
 
 	idx := 0
 	err = sse.Subscribe(ctx, req, func(msg *sse.Event) {
-		bts, _ := io.ReadAll(msg.Data)
-		val, _ := strconv.Atoi(string(bts))
+		val, _ := strconv.Atoi(string(msg.Data))
 		require.Equal(t, idx, val)
 		idx++
 	})
