@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"gopkg.in/cenkalti/backoff.v1"
+	"github.com/cenkalti/backoff/v4"
 )
 
 var (
