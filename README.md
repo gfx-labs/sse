@@ -43,7 +43,7 @@ func main() {
 }
 ```
 
-### server
+### sse server
 
 ```go
 package main
@@ -54,36 +54,36 @@ import (
 	"time"
 
 	"github.com/gfx-labs/sse"
-	"github.com/gfx-labs/sse/eventsource"
 )
 
 func main() {
-	srv := eventsource.NewServer(sse.DefaultUpgrader)
-	go func() {
-		for {
-			time.Sleep(1 * time.Second)
-			err := srv.Encode(&sse.Event{
-				Event: []byte("ping"),
-				Data:  []byte("foo"),
-			})
-			if err != nil {
-				log.Println(err)
-			}
+	http.Handle("/sse", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := sse.DefaultUpgrader.Upgrade(w, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-	}()
-	http.Handle("/sse", srv)
+		for {
+			err = conn.Encode(&sse.Event{Event: []byte("ping"), Data: []byte("foo")})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}))
 	log.Println("listening on :8080")
 	http.ListenAndServe(":8080", nil)
 }
 ```
 
-### eventsource
+### eventsource server
 
 a basic eventsource implementation is provided in eventsource/eventsource.go
 
-as there are multiple ways to implement `Last-Event-ID`, it should be used as a reference in order to implement your own EventSource server.
+see an example of a server+client in examples/eventsource/main.go
 
-for more customized sse logic, you should use the `sse.Upgrader` and write to the EventSink directly.
+as there are multiple ways to implement `Last-Event-ID`, it should be used as a reference in order to implement your own EventSource server.
 
 
 

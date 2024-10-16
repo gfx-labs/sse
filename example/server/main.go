@@ -6,24 +6,24 @@ import (
 	"time"
 
 	"github.com/gfx-labs/sse"
-	"github.com/gfx-labs/sse/eventsource"
 )
 
 func main() {
-	srv := eventsource.NewServer(sse.DefaultUpgrader)
-	go func() {
-		for {
-			time.Sleep(1 * time.Second)
-			err := srv.Encode(&sse.Event{
-				Event: []byte("ping"),
-				Data:  []byte("foo"),
-			})
-			if err != nil {
-				log.Println(err)
-			}
+	http.Handle("/sse", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := sse.DefaultUpgrader.Upgrade(w, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-	}()
-	http.Handle("/sse", srv)
+		for {
+			err = conn.Encode(&sse.Event{Event: []byte("ping"), Data: []byte("foo")})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}))
 	log.Println("listening on :8080")
 	http.ListenAndServe(":8080", nil)
 }
