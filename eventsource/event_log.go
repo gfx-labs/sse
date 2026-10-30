@@ -8,30 +8,32 @@ import (
 )
 
 type savedMessage struct {
-	shell sse.Event
-	id    int64
+	ev *sse.Event
+	id int64
 }
 
-func byId(a, b *savedMessage) bool {
+func byID(a, b *savedMessage) bool {
 	return a.id < b.id
 }
 
-// eventLog is safe for concurrent use.
+// eventLog is safe for concurrent use. A limit above zero keeps only the newest events.
 type eventLog struct {
 	mu     sync.RWMutex
 	events *btree.BTreeG[*savedMessage]
+	limit  int
 }
 
-func newEventLog() *eventLog {
-	return &eventLog{
-		events: btree.NewBTreeG(byId),
-	}
+func newEventLog(limit int) *eventLog {
+	return &eventLog{events: btree.NewBTreeG(byID), limit: limit}
 }
 
 func (l *eventLog) add(m *savedMessage) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.events.Set(m)
+	for l.limit > 0 && l.events.Len() > l.limit {
+		l.events.PopMin()
+	}
 }
 
 func (l *eventLog) latest() (*savedMessage, bool) {

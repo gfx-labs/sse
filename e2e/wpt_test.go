@@ -132,7 +132,7 @@ func TestWPTFormatFieldEvent(t *testing.T) {
 	raw := "event:test\ndata:x\n\ndata:x\n\n"
 	evs := decode(t, raw)
 	require.Len(t, evs, 2)
-	assert.Equal(t, []byte("test"), evs[0].Event)
+	assert.Equal(t, "test", evs[0].Event)
 	assert.Equal(t, []byte("x"), evs[0].Data)
 	assert.Empty(t, evs[1].Event, "second event has default (empty) event type")
 	assert.Equal(t, []byte("x"), evs[1].Data)
@@ -146,7 +146,7 @@ func TestWPTFormatFieldEventEmpty(t *testing.T) {
 	evs := decode(t, raw)
 	require.Len(t, evs, 1)
 	assert.Equal(t, []byte("data"), evs[0].Data)
-	assert.Equal(t, []byte(""), evs[0].Event)
+	assert.Equal(t, "", evs[0].Event)
 }
 
 // --- WPT: format-field-parsing ---
@@ -426,7 +426,7 @@ func TestWPTFormatFieldID(t *testing.T) {
 	evs := decode(t, raw)
 	require.Len(t, evs, 1)
 	require.NotNil(t, evs[0].ID)
-	assert.Equal(t, []byte("\xe2\x80\xa6"), *evs[0].ID)
+	assert.Equal(t, []byte("\xe2\x80\xa6"), evs[0].ID)
 	assert.Equal(t, []byte("hello"), evs[0].Data)
 }
 

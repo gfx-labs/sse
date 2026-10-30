@@ -2,51 +2,23 @@ package sse_test
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	"github.com/gfx-labs/sse"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestClientBasic(t *testing.T) {
+// Cancelling the context ends iteration while the server keeps the stream open.
+func TestClientHonorsContext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sink, err := sse.DefaultUpgrader.Upgrade(w, r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		for i := range 5 {
-			require.NoError(t, sink.Encode(&sse.Event{Data: []byte(strconv.Itoa(i))}))
-		}
-	}))
-	defer srv.Close()
-
-	req, err := http.NewRequest("GET", srv.URL, nil)
-	require.NoError(t, err)
-
-	idx := 0
-	err = sse.Subscribe(t.Context(), req, func(msg *sse.Event) {
-		val, _ := strconv.Atoi(string(msg.Data))
-		require.Equal(t, idx, val)
-		idx++
-	})
-	require.NoError(t, err)
-	require.Equal(t, 5, idx)
-}
-
-// Subscribe must return when its context is cancelled while the server keeps the stream open.
-func TestSubscribeHonorsContext(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sink, _ := sse.DefaultUpgrader.Upgrade(w, r)
-		_ = sink.Encode(&sse.Event{Data: []byte("x")})
+		stream, _ := sse.Upgrade(w, r)
+		_ = stream.Send(&sse.Event{Data: []byte("x")})
 		<-r.Context().Done()
 	}))
 	defer srv.Close()
@@ -56,17 +28,25 @@ func TestSubscribeHonorsContext(t *testing.T) {
 	req, err := http.NewRequest("GET", srv.URL, nil)
 	require.NoError(t, err)
 
-	done := make(chan error, 1)
-	go func() { done <- sse.Subscribe(ctx, req, func(*sse.Event) {}) }()
+	done := make(chan int, 1)
+	go func() {
+		n := 0
+		var c sse.Client
+		for _, err := range c.Events(ctx, req) {
+			assert.NoError(t, err)
+			n++
+		}
+		done <- n
+	}()
 	select {
-	case err := <-done:
-		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case n := <-done:
+		assert.Equal(t, 1, n)
 	case <-time.After(5 * time.Second):
-		t.Fatal("Subscribe ignored context cancellation")
+		t.Fatal("Events ignored context cancellation")
 	}
 }
 
-func TestSubscribeRejectsWrongContentType(t *testing.T) {
+func TestClientRejectsWrongContentType(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("data: x\n\n"))
@@ -74,43 +54,65 @@ func TestSubscribeRejectsWrongContentType(t *testing.T) {
 	defer srv.Close()
 	req, err := http.NewRequest("GET", srv.URL, nil)
 	require.NoError(t, err)
-	err = sse.Subscribe(t.Context(), req, func(*sse.Event) {})
-	require.ErrorIs(t, err, sse.ErrInvalidContentType)
+	var c sse.Client
+	for ev, err := range c.Events(t.Context(), req) {
+		require.Nil(t, ev)
+		require.ErrorIs(t, err, sse.ErrInvalidContentType)
+	}
 }
 
-// SubscribeWithRetry reconnects with the last seen id and stops when the context ends.
-func TestSubscribeWithRetryResumes(t *testing.T) {
+// 5xx responses are retried with backoff; the failure count resets after a successful connection.
+func TestClientRetriesServerErrors(t *testing.T) {
 	var conns atomic.Int32
-	lastIDs := make(chan string, 8)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lastIDs <- r.Header.Get("Last-Event-ID")
-		n := conns.Add(1)
-		sink, _ := sse.DefaultUpgrader.Upgrade(w, r)
-		_ = sink.Encode(&sse.Event{Data: []byte("x"), ID: sse.ID(strconv.Itoa(int(n)))})
+		if conns.Add(1) <= 2 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		stream, _ := sse.Upgrade(w, r)
+		_ = stream.Send(&sse.Event{Data: []byte("ok")})
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	got := 0
-	err := sse.SubscribeWithRetry(ctx, func() *http.Request {
-		req, _ := http.NewRequest("GET", srv.URL, nil)
-		return req
-	}, func(*sse.Event) {
-		got++
-		if got == 2 {
-			cancel()
-		}
-	}, backoff.NewConstantBackOff(time.Millisecond))
-
-	require.True(t, errors.Is(err, context.Canceled), "err: %v", err)
-	require.Equal(t, "", <-lastIDs)
-	require.Equal(t, "1", <-lastIDs)
+	var delays []time.Duration
+	c := sse.Client{
+		Retry:       time.Millisecond,
+		MaxRetry:    100 * time.Millisecond,
+		OnReconnect: func(_ error, d time.Duration) { delays = append(delays, d) },
+	}
+	req, err := http.NewRequest("GET", srv.URL, nil)
+	require.NoError(t, err)
+	for ev, err := range c.Events(t.Context(), req) {
+		require.NoError(t, err)
+		assert.Equal(t, "ok", string(ev.Data))
+		break
+	}
+	require.Len(t, delays, 2)
+	assert.Greater(t, delays[1], delays[0]/2, "second delay should back off: %v", delays)
+	assert.EqualValues(t, 3, conns.Load())
 }
 
-func TestEncoderRejectsLineBreakInField(t *testing.T) {
-	var b strings.Builder
-	err := sse.NewEncoder(&b).Encode(&sse.Event{Event: []byte("a\ndata: injected"), Data: []byte("x")})
-	require.ErrorIs(t, err, sse.ErrInvalidField)
-	require.NotContains(t, b.String(), "injected")
+// Clone keeps an event after the iterator reuses it.
+func TestClientCloneKeepsEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stream, _ := sse.Upgrade(w, r)
+		for i := range 3 {
+			_ = stream.Send(&sse.Event{Data: []byte(strconv.Itoa(i)), ID: []byte(strconv.Itoa(i))})
+		}
+	}))
+	defer srv.Close()
+
+	req, err := http.NewRequest("GET", srv.URL, nil)
+	require.NoError(t, err)
+	var kept []*sse.Event
+	c := sse.Client{DisableReconnect: true}
+	for ev, err := range c.Events(t.Context(), req) {
+		require.NoError(t, err)
+		kept = append(kept, ev.Clone())
+	}
+	require.Len(t, kept, 3)
+	for i, ev := range kept {
+		assert.Equal(t, strconv.Itoa(i), string(ev.Data))
+		assert.Equal(t, strconv.Itoa(i), string(ev.ID))
+	}
 }

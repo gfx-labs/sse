@@ -10,46 +10,28 @@ import (
 	"github.com/gfx-labs/sse/eventsource"
 )
 
-func server() {
-	srv := eventsource.NewServer(sse.DefaultUpgrader)
+func main() {
+	srv := eventsource.NewServer(1000)
 	go func() {
-		for {
-			time.Sleep(1 * time.Second)
-			err := srv.Encode(&sse.Event{
-				Event: []byte("ping"),
-				Data:  []byte("foo"),
-			})
+		for range time.Tick(time.Second) {
+			srv.Publish(&sse.Event{Event: "ping", Data: []byte("foo")})
+		}
+	}()
+	go func() {
+		time.Sleep(time.Second)
+		req, err := http.NewRequest("GET", "http://localhost:8080/sse", nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		var c sse.Client
+		for ev, err := range c.Events(context.Background(), req) {
 			if err != nil {
-				log.Println(err)
+				log.Fatal(err)
 			}
+			log.Println("got message", ev.Event, string(ev.Data), string(ev.ID))
 		}
 	}()
 	http.Handle("/sse", srv)
 	log.Println("listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
-}
-
-func client() error {
-	ctx, cn := context.WithCancel(context.Background())
-	defer cn()
-	req, err := http.NewRequest("GET", "http://localhost:8080/sse", nil)
-	if err != nil {
-		return err
-	}
-	req = req.WithContext(ctx)
-	err = sse.Subscribe(ctx, req, func(msg *sse.Event) {
-		log.Println("got message", string(msg.Event), string(msg.Data))
-	})
-	return err
-}
-
-func main() {
-	go func() {
-		time.Sleep(2 * time.Second)
-		err := client()
-		if err != nil {
-			panic(err)
-		}
-	}()
-	server()
 }

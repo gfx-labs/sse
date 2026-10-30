@@ -20,125 +20,71 @@ func (errWriter) Write([]byte) (int, error) {
 	return 0, errors.New("write failed")
 }
 
-// --- Writer error paths ---
-
-func TestWriterFieldWriteError(t *testing.T) {
-	w := sse.NewWriter(errWriter{})
-	err := w.Field("event", []byte("x"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "write failed")
-}
-
-func TestWriterFieldTopicWriteError(t *testing.T) {
-	// Field with empty topic but name "id" still writes
-	w := sse.NewWriter(errWriter{})
-	err := w.Field("id", nil)
-	require.Error(t, err)
-}
-
-func TestWriterWriteError(t *testing.T) {
-	w := sse.NewWriter(errWriter{})
-	_, err := w.Write([]byte("data"))
-	require.Error(t, err)
-}
-
-func TestWriterFlushError(t *testing.T) {
-	// Get writer into inMessage state, then make it fail on flush
-	buf := &bytes.Buffer{}
-	w := sse.NewWriter(buf)
-	_, err := w.Write([]byte("x"))
-	require.NoError(t, err)
-
-	// Now create a writer with errWriter and set it to inMessage state
-	w2 := sse.NewWriter(errWriter{})
-	// Write will fail on checkMessage's first write
-	_, err = w2.Write([]byte("x"))
-	require.Error(t, err)
-}
-
-func TestWriterNextError(t *testing.T) {
-	w := sse.NewWriter(errWriter{})
-	// Next calls Flush then writeByte; on errWriter the Flush newline write fails
-	// but only if inMessage. Without inMessage, it goes straight to writeByte('\n')
-	err := w.Next()
-	require.Error(t, err)
-}
-
 // --- Encoder error paths ---
 
-func TestEncoderEncodeWriteError(t *testing.T) {
-	enc := sse.NewEncoder(errWriter{})
-	err := enc.Encode(&sse.Event{Event: []byte("test")})
-	require.Error(t, err)
-}
-
-func TestEncoderEncodeDataWriteError(t *testing.T) {
-	enc := sse.NewEncoder(errWriter{})
-	err := enc.Encode(&sse.Event{Data: []byte("test")})
-	require.Error(t, err)
-}
-
-func TestEncoderEncodeFieldsWriteError(t *testing.T) {
-	enc := sse.NewEncoder(errWriter{})
-	err := enc.Encode(&sse.Event{Fields: map[string][]byte{"k": []byte("v")}})
-	require.Error(t, err)
-}
-
-func TestEncoderEncodeIDWriteError(t *testing.T) {
-	// the encoder sends each event in one Write, so a failing first write must surface
-	enc := sse.NewEncoder(&failAfterN{n: 0})
-	err := enc.Encode(&sse.Event{ID: sse.ID("1")})
-	require.Error(t, err)
-}
-
-// failAfterN is an io.Writer that succeeds for the first n Write calls then fails.
-type failAfterN struct {
-	n     int
-	count int
-}
-
-func (f *failAfterN) Write(p []byte) (int, error) {
-	f.count++
-	if f.count > f.n {
-		return 0, errors.New("write failed")
+func TestEncoderWriteError(t *testing.T) {
+	for name, ev := range map[string]*sse.Event{
+		"event":  {Event: "test"},
+		"data":   {Data: []byte("test")},
+		"fields": {Fields: map[string][]byte{"k": []byte("v")}},
+		"id":     {ID: []byte("1")},
+		"bareID": {ID: []byte{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := sse.NewEncoder(errWriter{}).Encode(ev)
+			require.ErrorContains(t, err, "write failed")
+		})
 	}
-	return len(p), nil
 }
 
-// --- Subscribe error paths ---
+func TestEncoderCommentWriteError(t *testing.T) {
+	require.Error(t, sse.NewEncoder(errWriter{}).Comment("x"))
+}
 
-func TestSubscribeNon200(t *testing.T) {
+// --- Client error paths ---
+
+func TestClientNon200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("server error"))
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
 	}))
 	defer srv.Close()
 
-	req, _ := http.NewRequest("GET", srv.URL, nil)
-	err := sse.Subscribe(context.Background(), req, func(msg *sse.Event) {})
+	err := firstErr(t, sse.Client{}, srv.URL)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Internal Server Error")
+	assert.Contains(t, err.Error(), "400")
 }
 
-func TestSubscribeBadURL(t *testing.T) {
-	req, _ := http.NewRequest("GET", "http://127.0.0.1:1", nil)
-	err := sse.Subscribe(context.Background(), req, func(msg *sse.Event) {})
+func TestClientBadURLDisableReconnect(t *testing.T) {
+	err := firstErr(t, sse.Client{DisableReconnect: true}, "http://127.0.0.1:1")
 	require.Error(t, err)
 }
 
-// --- EventSink context cancellation ---
+func firstErr(t *testing.T, c sse.Client, url string) error {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	require.NoError(t, err)
+	for _, err := range c.Events(t.Context(), req) {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-func TestEventSinkContextCancelled(t *testing.T) {
+// --- Stream context cancellation ---
+
+func TestStreamContextCancelled(t *testing.T) {
 	ctx, cn := context.WithCancel(context.Background())
 	cn() // cancel immediately
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sink, err := sse.DefaultUpgrader.Upgrade(w, r.WithContext(ctx))
-		if err != nil {
+		stream, err := sse.Upgrade(w, r.WithContext(ctx))
+		if !assert.NoError(t, err) {
 			return
 		}
-		err = sink.Encode(&sse.Event{Data: []byte("hello")})
-		assert.ErrorIs(t, err, context.Canceled)
+		assert.ErrorIs(t, stream.Send(&sse.Event{Data: []byte("hello")}), context.Canceled)
+		assert.ErrorIs(t, stream.Comment("x"), context.Canceled)
 	}))
 	defer srv.Close()
 
@@ -147,16 +93,38 @@ func TestEventSinkContextCancelled(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 }
 
-// --- Upgrader streaming not supported ---
+// --- Upgrade streaming not supported ---
 
-func TestUpgraderStreamingNotSupported(t *testing.T) {
-	// httptest.ResponseRecorder does not implement http.Flusher in older Go versions,
-	// but httptest.NewRecorder actually does. Use a minimal ResponseWriter instead.
+func TestUpgradeStreamingNotSupported(t *testing.T) {
 	w := &noFlushResponseWriter{header: http.Header{}}
 	r := httptest.NewRequest("GET", "/", nil)
-	_, err := sse.DefaultUpgrader.Upgrade(w, r)
+	_, err := sse.Upgrade(w, r)
 	require.ErrorIs(t, err, sse.ErrStreamingNotSupported)
 }
+
+// Middleware that wraps the ResponseWriter but exposes Unwrap must still stream.
+func TestUpgradeWrappedWriter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stream, err := sse.Upgrade(&unwrapWriter{w}, r)
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.NoError(t, stream.Send(&sse.Event{Data: []byte("hi")}))
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	for ev, err := range sse.Events(resp.Body) {
+		require.NoError(t, err)
+		assert.Equal(t, "hi", string(ev.Data))
+	}
+}
+
+type unwrapWriter struct{ http.ResponseWriter }
+
+func (u *unwrapWriter) Unwrap() http.ResponseWriter { return u.ResponseWriter }
 
 type noFlushResponseWriter struct {
 	header http.Header
@@ -166,57 +134,47 @@ func (n *noFlushResponseWriter) Header() http.Header         { return n.header }
 func (n *noFlushResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (n *noFlushResponseWriter) WriteHeader(int)             {}
 
-// --- Writer UTF-8 validation via full pipeline ---
+// --- UTF-8 validation ---
 
-func TestWriterUTF8ValidationE2E(t *testing.T) {
-	buf := &bytes.Buffer{}
-	w := sse.NewWriter(buf, sse.OptionValidateUtf8(true))
-
-	// Valid UTF-8 should work
-	require.NoError(t, w.Field("event", []byte("valid")))
-
-	// Invalid UTF-8 should error on Field
-	err := w.Field("event", []byte{0xff, 0xfe})
-	require.ErrorIs(t, err, sse.ErrInvalidUTF8Bytes)
-
-	// Invalid UTF-8 should error on Write
-	_, err = w.Write([]byte{0x80, 0x81})
-	require.ErrorIs(t, err, sse.ErrInvalidUTF8Bytes)
+func TestEncoderUTF8Validation(t *testing.T) {
+	enc := sse.NewEncoder(&bytes.Buffer{}, sse.WithUTF8Validation())
+	require.NoError(t, enc.Encode(&sse.Event{Event: "valid", Data: []byte("ok")}))
+	require.ErrorIs(t, enc.Encode(&sse.Event{Event: "\xff\xfe"}), sse.ErrInvalidUTF8)
+	require.ErrorIs(t, enc.Encode(&sse.Event{Data: []byte{0x80, 0x81}}), sse.ErrInvalidUTF8)
+	require.ErrorIs(t, enc.Encode(&sse.Event{ID: []byte{0x80}}), sse.ErrInvalidUTF8)
 }
 
-// --- Writer carriage return in data ---
+// --- Line breaks in data ---
 
-func TestWriterCarriageReturnE2E(t *testing.T) {
-	buf := &bytes.Buffer{}
-	w := sse.NewWriter(buf)
-
-	// \r should split data lines
-	_, err := w.Write([]byte("a\rb"))
-	require.NoError(t, err)
-	require.NoError(t, w.Flush())
-	assert.Equal(t, "data: a\rdata: b\n", buf.String())
+func TestEncoderDataLineBreaks(t *testing.T) {
+	for in, want := range map[string]string{
+		"a\rb":   "data: a\ndata: b\n\n",
+		"a\r\nb": "data: a\ndata: b\n\n",
+		"a\nb":   "data: a\ndata: b\n\n",
+		"a\r":    "data: a\ndata: \n\n",
+		"":       "data: \n\n",
+	} {
+		var buf bytes.Buffer
+		require.NoError(t, sse.NewEncoder(&buf).Encode(&sse.Event{Data: []byte(in)}))
+		assert.Equal(t, want, buf.String(), "input %q", in)
+	}
 }
 
-func TestWriterCRLFInData(t *testing.T) {
-	buf := &bytes.Buffer{}
-	w := sse.NewWriter(buf)
+// --- Injection through fields ---
 
-	_, err := w.Write([]byte("a\r\nb"))
-	require.NoError(t, err)
-	require.NoError(t, w.Flush())
-	assert.Equal(t, "data: a\r\ndata: b\n", buf.String())
-}
-
-// --- Flush with trailing carriage ---
-
-func TestWriterFlushTrailingCarriage(t *testing.T) {
-	buf := &bytes.Buffer{}
-	w := sse.NewWriter(buf)
-
-	_, err := w.Write([]byte("a\r"))
-	require.NoError(t, err)
-	// At this point trailingCarriage is true, inMessage is false
-	require.NoError(t, w.Flush())
-	// Flush should write the trailing newline
-	assert.Contains(t, buf.String(), "data: a\r\n")
+func TestEncoderRejectsLineBreaks(t *testing.T) {
+	for name, ev := range map[string]*sse.Event{
+		"event":      {Event: "a\ndata: injected"},
+		"id":         {ID: []byte("1\r")},
+		"fieldValue": {Fields: map[string][]byte{"k": []byte("a\nb")}},
+		"fieldName":  {Fields: map[string][]byte{"a:b": []byte("v")}},
+		"emptyName":  {Fields: map[string][]byte{"": []byte("v")}},
+		"comment":    {Comments: [][]byte{[]byte("a\nb")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			require.ErrorIs(t, sse.NewEncoder(&buf).Encode(ev), sse.ErrInvalidField)
+			assert.Empty(t, buf.String())
+		})
+	}
 }

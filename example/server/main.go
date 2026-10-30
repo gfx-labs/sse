@@ -9,21 +9,25 @@ import (
 )
 
 func main() {
-	http.Handle("/sse", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := sse.DefaultUpgrader.Upgrade(w, r)
+	http.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+		stream, err := sse.Upgrade(w, r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
 		for {
-			err = conn.Encode(&sse.Event{Event: []byte("ping"), Data: []byte("foo")})
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+			select {
+			case <-r.Context().Done():
 				return
+			case <-t.C:
+				if err := stream.Send(&sse.Event{Event: "ping", Data: []byte("foo")}); err != nil {
+					return
+				}
 			}
-			time.Sleep(1 * time.Second)
 		}
-	}))
+	})
 	log.Println("listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }

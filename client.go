@@ -5,110 +5,169 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
+	"math/rand/v2"
 	"mime"
 	"net/http"
-	"sync"
-
-	"github.com/cenkalti/backoff/v4"
+	"time"
 )
 
-// Subscribe to a data stream with context. The handler is called on every event.
-// It returns nil when the server closes the stream and an error on any failure.
-// The Event passed to handler is reused, so copy it to keep it past the call.
-// Pass WithHTTPClient to use a client other than http.DefaultClient.
-func Subscribe(ctx context.Context, r *http.Request, handler func(msg *Event), opts ...Option) error {
-	o := newOptions(opts)
-	req := AddSSEHeaders(ctx, r, nil)
-	resp, err := o.client().Do(req)
+const (
+	defaultRetry    = 3 * time.Second
+	defaultMaxRetry = 30 * time.Second
+)
+
+// Client consumes event streams and reconnects as the spec describes.
+// The zero value is ready to use.
+type Client struct {
+	// HTTPClient sends requests. nil means http.DefaultClient.
+	// Its Timeout must be zero or it will cut long-lived streams.
+	HTTPClient *http.Client
+	// Retry is the initial reconnect delay when the server has not sent one. Defaults to 3s.
+	Retry time.Duration
+	// MaxRetry caps the delay between consecutive failed attempts, which doubles
+	// after each failure. Defaults to 30s.
+	MaxRetry time.Duration
+	// DisableReconnect stops the stream at the first disconnect.
+	DisableReconnect bool
+	// OnReconnect, if set, is called before waiting to reconnect, with the error
+	// that ended the previous attempt (io.EOF if the server closed the stream).
+	OnReconnect func(err error, delay time.Duration)
+	// Options apply to the decoder of each connection.
+	Options []Option
+}
+
+// Events sends req and yields events from the response, reconnecting with
+// Last-Event-ID after disconnects until ctx is done.
+//
+// The sequence ends without an error when ctx is cancelled, when the server
+// responds 204 No Content, or, with DisableReconnect, when the server closes
+// the stream. It yields a final error for responses that are not retried: any
+// status other than 200, 408, 429 and 5xx, and a Content-Type other than
+// text/event-stream. The yielded Event is reused for the next event.
+//
+// The request is cloned for every attempt, so it must not have a body.
+func (c *Client) Events(ctx context.Context, req *http.Request) iter.Seq2[*Event, error] {
+	return func(yield func(*Event, error) bool) {
+		var (
+			lastID   string
+			retry    = c.Retry
+			failures int
+		)
+		if retry <= 0 {
+			retry = defaultRetry
+		}
+		for {
+			r := req.Clone(ctx)
+			r.Header.Set("Accept", "text/event-stream")
+			r.Header.Set("Cache-Control", "no-cache")
+			if lastID != "" {
+				r.Header.Set("Last-Event-ID", lastID)
+			}
+			got, stop, err := c.attempt(r, func(ev *Event) bool {
+				if ev.ID != nil {
+					lastID = string(ev.ID)
+				}
+				if ev.Retry > 0 {
+					retry = ev.Retry
+				}
+				return yield(ev, nil)
+			})
+			switch {
+			case stop || ctx.Err() != nil:
+				return
+			case errors.Is(err, errPermanent):
+				yield(nil, errors.Unwrap(err))
+				return
+			case c.DisableReconnect:
+				if !errors.Is(err, io.EOF) {
+					yield(nil, err)
+				}
+				return
+			}
+			if got {
+				failures = 0
+			} else {
+				failures++
+			}
+			delay := c.backoff(retry, failures)
+			if c.OnReconnect != nil {
+				c.OnReconnect(err, delay)
+			}
+			t := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+	}
+}
+
+var errPermanent = errors.New("permanent")
+
+type permanentError struct{ err error }
+
+func (p permanentError) Error() string        { return p.err.Error() }
+func (p permanentError) Unwrap() error        { return p.err }
+func (p permanentError) Is(target error) bool { return target == errPermanent }
+
+// attempt runs one connection. got reports whether any event was received and
+// stop whether the consumer or server ended the stream.
+func (c *Client) attempt(r *http.Request, yield func(*Event) bool) (got, stop bool, err error) {
+	hc := c.HTTPClient
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	resp, err := hc.Do(r)
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		bts, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return backoffError(resp.StatusCode, fmt.Errorf("%s: %s", http.StatusText(resp.StatusCode), bts))
+
+	switch s := resp.StatusCode; {
+	case s == http.StatusNoContent:
+		// the spec tells clients to stop reconnecting
+		return false, true, nil
+	case s != http.StatusOK:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		err := fmt.Errorf("sse: %s: %s", resp.Status, body)
+		if s == http.StatusRequestTimeout || s == http.StatusTooManyRequests || s >= 500 {
+			return false, false, err
+		}
+		return false, false, permanentError{err}
 	}
 	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "text/event-stream" {
-		return backoff.Permanent(fmt.Errorf("%w: %q", ErrInvalidContentType, resp.Header.Get("Content-Type")))
+		return false, false, permanentError{fmt.Errorf("%w: %q", ErrInvalidContentType, resp.Header.Get("Content-Type"))}
 	}
-	dec := NewDecoder(NewReader(resp.Body, opts...))
-	msg := &Event{}
+
+	d := NewDecoder(resp.Body, c.Options...)
+	ev := &Event{}
 	for {
-		// on any sort of error while decoding, we close the connection.
-		err := dec.Decode(msg)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
+		if err := d.Decode(ev); err != nil {
+			if errors.Is(err, ErrLineTooLong) {
+				return got, false, permanentError{err}
 			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return err
+			return got, false, err
 		}
-		if msg.hasContent() {
-			handler(msg)
+		got = true
+		if !yield(ev) {
+			return got, true, nil
 		}
 	}
 }
 
-// backoffError marks client errors other than 408 and 429 as permanent so retries stop.
-func backoffError(status int, err error) error {
-	if status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests {
-		return backoff.Permanent(err)
+func (c *Client) backoff(retry time.Duration, failures int) time.Duration {
+	limit := c.MaxRetry
+	if limit <= 0 {
+		limit = defaultMaxRetry
 	}
-	return err
-}
-
-// SubscribeWithRetry resubscribes using strategy, or an exponential backoff when strategy is nil.
-// It sends the last seen event id on reconnect and stops when ctx is done.
-func SubscribeWithRetry(
-	ctx context.Context,
-	factory func() *http.Request,
-	handler func(msg *Event),
-	strategy backoff.BackOff,
-	opts ...Option,
-) error {
-	var mu sync.Mutex
-	var lastID *string
-	wrapHandler := func(msg *Event) {
-		if msg.ID != nil {
-			idString := string(*msg.ID)
-			mu.Lock()
-			lastID = &idString
-			mu.Unlock()
-		}
-		handler(msg)
+	d := retry
+	for i := 1; i < failures && d < limit; i++ {
+		d *= 2
 	}
-	operation := func() error {
-		mu.Lock()
-		id := lastID
-		mu.Unlock()
-		err := Subscribe(ctx, AddSSEHeaders(ctx, factory(), id), wrapHandler, opts...)
-		if ctx.Err() != nil {
-			return backoff.Permanent(ctx.Err())
-		}
-		if err == nil {
-			// the server closed the stream; reconnect per the spec
-			return io.ErrUnexpectedEOF
-		}
-		return err
-	}
-	if strategy == nil {
-		strategy = backoff.NewExponentialBackOff()
-	}
-	return backoff.Retry(operation, backoff.WithContext(strategy, ctx))
-}
-
-// AddSSEHeaders returns a copy of r bound to ctx with the event stream request headers set.
-func AddSSEHeaders(ctx context.Context, r *http.Request, lastID *string) *http.Request {
-	req := r.Clone(ctx)
-
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Accept", "text/event-stream")
-
-	if lastID != nil && len(*lastID) > 0 && req.Header.Get("Last-Event-ID") == "" {
-		req.Header.Set("Last-Event-ID", *lastID)
-	}
-
-	return req
+	d = min(d, max(limit, retry))
+	// jitter of up to 20% spreads reconnects after a server restart
+	return d - time.Duration(rand.Int64N(int64(d)/5+1))
 }

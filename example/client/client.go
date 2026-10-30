@@ -19,10 +19,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = sse.Subscribe(ctx, req, func(msg *sse.Event) {
-		log.Printf("msg: %s", string(msg.Data))
-	})
-	if err != nil && ctx.Err() == nil {
-		log.Fatal(err)
+	var c sse.Client
+	for ev, err := range c.Events(ctx, req) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("%s: %s", ev.Event, ev.Data)
 	}
 }

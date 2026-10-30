@@ -1,54 +1,28 @@
 package sse
 
-import "net/http"
-
-type Options struct {
-	validateUTF8  bool
-	maxBufferSize int
-	httpClient    *http.Client
+type options struct {
+	maxLineSize  int
+	validateUTF8 bool
 }
 
-func newOptions(opts []Option) *Options {
-	o := &Options{}
-	for _, v := range opts {
-		v(o)
+// Option configures a Decoder, Encoder or Stream.
+type Option func(*options)
+
+func newOptions(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
 	}
 	return o
 }
 
-func (e *Options) ValidateUTF8() bool {
-	return e.validateUTF8
+// WithMaxLineSize limits the length of a decoded line in bytes. Longer lines fail
+// with ErrLineTooLong. Zero, the default, means no limit.
+func WithMaxLineSize(n int) Option {
+	return func(o *options) { o.maxLineSize = n }
 }
 
-// MaxBufferSize is the longest line, in bytes, the Reader accepts. Zero means unlimited.
-func (e *Options) MaxBufferSize() int {
-	return e.maxBufferSize
-}
-
-func (e *Options) client() *http.Client {
-	if e.httpClient != nil {
-		return e.httpClient
-	}
-	return http.DefaultClient
-}
-
-type Option func(*Options)
-
-func OptionValidateUtf8(enable bool) Option {
-	return func(o *Options) {
-		o.validateUTF8 = enable
-	}
-}
-
-func OptionMaxBufferSize(i int) Option {
-	return func(o *Options) {
-		o.maxBufferSize = i
-	}
-}
-
-// WithHTTPClient sets the client used by Subscribe and SubscribeWithRetry.
-func WithHTTPClient(c *http.Client) Option {
-	return func(o *Options) {
-		o.httpClient = c
-	}
+// WithUTF8Validation makes the Encoder reject events that are not valid UTF-8.
+func WithUTF8Validation() Option {
+	return func(o *options) { o.validateUTF8 = true }
 }

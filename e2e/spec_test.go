@@ -4,28 +4,22 @@ package e2e
 
 import (
 	"bytes"
-	"strings"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/gfx-labs/sse"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// decode is a helper that feeds raw SSE text through Reader→Decoder and returns all events.
-// Fields is pre-initialized to work around a nil-map bug in decoder.go:84.
+// decode feeds raw SSE text through the decoder and returns copies of all events.
 func decode(t *testing.T, raw string) []*sse.Event {
 	t.Helper()
-	r := sse.NewReader(strings.NewReader(raw))
-	dec := sse.NewDecoder(r)
 	var events []*sse.Event
-	for {
-		ev := &sse.Event{Fields: map[string][]byte{}}
-		err := dec.Decode(ev)
-		if err != nil {
-			break
-		}
-		events = append(events, ev)
+	for ev, err := range sse.Events(bytes.NewReader([]byte(raw))) {
+		require.NoError(t, err)
+		events = append(events, ev.Clone())
 	}
 	return events
 }
@@ -40,9 +34,7 @@ func TestSpecLineEndingLF(t *testing.T) {
 }
 
 func TestSpecLineEndingCR(t *testing.T) {
-	// Bare \r as line endings. The reader needs the next byte after \r to flush
-	// the pending carriage, so we append \n at stream end to ensure dispatch.
-	raw := "data: hello\r\r\n"
+	raw := "data: hello\r\r"
 	evs := decode(t, raw)
 	require.Len(t, evs, 1)
 	assert.Equal(t, []byte("hello"), evs[0].Data)
@@ -94,7 +86,7 @@ func TestSpecEventField(t *testing.T) {
 	raw := "event: myevent\ndata: payload\n\n"
 	evs := decode(t, raw)
 	require.Len(t, evs, 1)
-	assert.Equal(t, []byte("myevent"), evs[0].Event)
+	assert.Equal(t, "myevent", evs[0].Event)
 	assert.Equal(t, []byte("payload"), evs[0].Data)
 }
 
@@ -103,16 +95,16 @@ func TestSpecIDField(t *testing.T) {
 	evs := decode(t, raw)
 	require.Len(t, evs, 1)
 	require.NotNil(t, evs[0].ID)
-	assert.Equal(t, []byte("42"), *evs[0].ID)
+	assert.Equal(t, []byte("42"), evs[0].ID)
 }
 
 func TestSpecEmptyID(t *testing.T) {
-	// "id:" with no value sets ID to empty (nil-length) byte slice
+	// "id:" with no value resets the last event id: ID is empty but not nil
 	raw := "id:\ndata: payload\n\n"
 	evs := decode(t, raw)
 	require.Len(t, evs, 1)
 	require.NotNil(t, evs[0].ID)
-	assert.Len(t, *evs[0].ID, 0)
+	assert.Empty(t, evs[0].ID)
 }
 
 func TestSpecRetryField(t *testing.T) {
@@ -120,8 +112,8 @@ func TestSpecRetryField(t *testing.T) {
 	evs := decode(t, raw)
 	require.Len(t, evs, 1)
 	assert.Equal(t, []byte("payload"), evs[0].Data)
-	require.NotNil(t, evs[0].Fields)
-	assert.Contains(t, evs[0].Fields, "retry")
+	assert.Equal(t, 5*time.Second, evs[0].Retry)
+	assert.Empty(t, evs[0].Fields)
 }
 
 // --- Multi-line data (spec section 9.2.4) ---
@@ -173,41 +165,30 @@ func TestSpecCommentIgnored(t *testing.T) {
 }
 
 func TestSpecCommentOnlyStream(t *testing.T) {
-	// A stream of only comments should produce no events with content
+	// Comments alone, such as keep-alives, do not dispatch an event
 	raw := ": comment1\n: comment2\n\n"
-	evs := decode(t, raw)
-	// Dispatch happens but no data/event/id content — implementation returns event
-	// with only comments; hasContent() returns false so Subscribe would skip it
-	for _, ev := range evs {
-		assert.Empty(t, ev.Data)
-		assert.Nil(t, ev.ID)
-		assert.Empty(t, ev.Event)
-	}
+	assert.Empty(t, decode(t, raw))
 }
 
-func TestSpecCommentPreservesColon(t *testing.T) {
-	// Comment value includes the leading colon in raw token
-	raw := ":hello\ndata: x\n\n"
+func TestSpecCommentText(t *testing.T) {
+	// Comment text excludes the colon and one optional leading space
+	raw := ":hello\n:  two\ndata: x\n\n"
 	evs := decode(t, raw)
 	require.Len(t, evs, 1)
-	require.Len(t, evs[0].Comments, 1)
-	assert.Equal(t, []byte(":hello"), evs[0].Comments[0])
+	require.Len(t, evs[0].Comments, 2)
+	assert.Equal(t, "hello", string(evs[0].Comments[0]))
+	assert.Equal(t, " two", string(evs[0].Comments[1]))
 }
 
 // --- Unknown fields (spec section 9.2.4) ---
 
 func TestSpecUnknownFieldIgnored(t *testing.T) {
-	// Unknown fields are collected in Fields map.
-	// Note: decoder has a bug where Fields map is not initialized before writing
-	// custom fields (decoder.go:84). Pre-initialize Fields in the Event to work
-	// around this. The data field should still be correct.
+	// Unknown fields are collected in the Fields map
 	raw := "foo: bar\ndata: payload\n\n"
-	r := sse.NewReader(strings.NewReader(raw))
-	dec := sse.NewDecoder(r)
-	ev := &sse.Event{Fields: map[string][]byte{}}
-	require.NoError(t, dec.Decode(ev))
-	assert.Equal(t, []byte("payload"), ev.Data)
-	assert.Equal(t, []byte("bar"), ev.Fields["foo"])
+	evs := decode(t, raw)
+	require.Len(t, evs, 1)
+	assert.Equal(t, []byte("payload"), evs[0].Data)
+	assert.Equal(t, []byte("bar"), evs[0].Fields["foo"])
 }
 
 // --- Leading space stripping (spec section 9.2.4) ---
@@ -252,26 +233,18 @@ func TestSpecEventWithAllFields(t *testing.T) {
 	require.Len(t, evs, 1)
 	ev := evs[0]
 	require.NotNil(t, ev.ID)
-	assert.Equal(t, []byte("1"), *ev.ID)
-	assert.Equal(t, []byte("update"), ev.Event)
+	assert.Equal(t, []byte("1"), ev.ID)
+	assert.Equal(t, "update", ev.Event)
 	assert.Equal(t, []byte("payload"), ev.Data)
-	assert.Contains(t, ev.Fields, "retry")
+	assert.Equal(t, time.Second, ev.Retry)
 }
 
 // --- Consecutive blank lines ---
 
 func TestSpecConsecutiveBlankLines(t *testing.T) {
-	// Consecutive blank lines after a dispatch should produce skip tokens, not extra events
+	// Extra blank lines do not dispatch empty events
 	raw := "data: x\n\n\n\n"
-	evs := decode(t, raw)
-	// Only one event with actual content
-	contentEvents := 0
-	for _, ev := range evs {
-		if len(ev.Data) > 0 || ev.ID != nil || len(ev.Event) > 0 {
-			contentEvents++
-		}
-	}
-	assert.Equal(t, 1, contentEvents)
+	assert.Len(t, decode(t, raw), 1)
 }
 
 // --- Empty stream ---
@@ -284,9 +257,58 @@ func TestSpecEmptyStream(t *testing.T) {
 // --- Stream with only whitespace/newlines ---
 
 func TestSpecOnlyNewlines(t *testing.T) {
-	evs := decode(t, "\n\n\n")
-	// No data events
-	for _, ev := range evs {
-		assert.Empty(t, ev.Data)
+	assert.Empty(t, decode(t, "\n\n\n"))
+}
+
+// The line limit applies per line, so long streams of short lines are fine.
+func TestSpecMaxLineSize(t *testing.T) {
+	raw := "data: short\n\ndata: " + string(bytes.Repeat([]byte("x"), 100)) + "\n\n"
+	var got []string
+	var err error
+	for ev, e := range sse.Events(bytes.NewReader([]byte(raw)), sse.WithMaxLineSize(32)) {
+		if e != nil {
+			err = e
+			break
+		}
+		got = append(got, string(ev.Data))
 	}
+	require.ErrorIs(t, err, sse.ErrLineTooLong)
+	assert.Equal(t, []string{"short"}, got)
+}
+
+// Lines split across reads, including a "\r\n" split between reads, decode correctly.
+func TestSpecSplitReads(t *testing.T) {
+	raw := "data: a\r\ndata: bcd\r\n\r\nevent: e\rdata: f\r\r"
+	var got []string
+	for ev, err := range sse.Events(&oneByteReader{s: raw}) {
+		require.NoError(t, err)
+		got = append(got, ev.Event+"|"+string(ev.Data))
+	}
+	assert.Equal(t, []string{"|a\nbcd", "e|f"}, got)
+}
+
+type oneByteReader struct{ s string }
+
+func (r *oneByteReader) Read(p []byte) (int, error) {
+	if r.s == "" {
+		return 0, io.EOF
+	}
+	p[0] = r.s[0]
+	r.s = r.s[1:]
+	return 1, nil
+}
+
+// A reused Event must not keep fields from the previous event.
+func TestSpecDecoderReuse(t *testing.T) {
+	d := sse.NewDecoder(bytes.NewReader([]byte("event: x\nid: 1\nfoo: y\nretry: 5\n:c\ndata: 1\n\ndata: 2\n\n")))
+	var ev sse.Event
+	require.NoError(t, d.Decode(&ev))
+	require.NoError(t, d.Decode(&ev))
+	assert.Empty(t, ev.Event)
+	assert.Nil(t, ev.ID)
+	assert.Empty(t, ev.Fields)
+	assert.Empty(t, ev.Comments)
+	assert.Zero(t, ev.Retry)
+	assert.Equal(t, "2", string(ev.Data))
+	require.ErrorIs(t, d.Decode(&ev), io.EOF)
 }

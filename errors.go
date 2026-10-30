@@ -3,11 +3,9 @@ package sse
 import "errors"
 
 var (
-	ErrInvalidUTF8Bytes      = errors.New("invalid utf8 bytes")
-	ErrInvalidContentType    = errors.New("invalid content type")
-	ErrStreamingNotSupported = errors.New("streaming not supported")
-	ErrUnknownTokenType      = errors.New("unknown token type")
-	ErrInvalidToken          = errors.New("invalid token")
-	ErrLineTooLong           = errors.New("line exceeds max buffer size")
-	ErrInvalidField          = errors.New("field name or value contains a line break or invalid character")
+	ErrInvalidUTF8           = errors.New("sse: invalid utf8")
+	ErrInvalidContentType    = errors.New("sse: invalid content type")
+	ErrStreamingNotSupported = errors.New("sse: streaming not supported")
+	ErrLineTooLong           = errors.New("sse: line exceeds max line size")
+	ErrInvalidField          = errors.New("sse: field name or value contains a line break or invalid character")
 )

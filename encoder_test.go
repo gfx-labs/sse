@@ -3,51 +3,25 @@ package sse
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestEncoderSimple(t *testing.T) {
-	type testCase struct {
-		xs []*Event
-		w  string
-	}
-	cases := []testCase{{
-		[]*Event{
-			{Event: []byte("hello"), Data: []byte("some data")},
-			{Data: []byte("some other data with no event header")},
-		},
-		"event: hello\ndata: some data\n\ndata: some other data with no event header\n\n",
-	},
-		{
-			[]*Event{
-				{Event: []byte("hello"), Data: []byte("some \n funky\r\n data\r")},
-				{Data: []byte("some other data with an id"), ID: ID("dogs")},
-			}, "event: hello\ndata: some \ndata:  funky\r\ndata:  data\r\n\ndata: some other data with an id\nid: dogs\n\n",
-		},
-	}
-	for _, v := range cases {
-		buf := &bytes.Buffer{}
-		enc := NewEncoder(buf)
-		for _, p := range v.xs {
-			require.NoError(t, enc.Encode(p))
-		}
-		assert.EqualValues(t, v.w, buf.String())
-	}
-}
-
-func TestEncoderFields(t *testing.T) {
-	// covers: Encoder.Encode with Fields map and empty ID
-	buf := &bytes.Buffer{}
-	enc := NewEncoder(buf)
+// Exact wire format, including field order: comments, event, fields, retry, data, id.
+func TestEncoderWireFormat(t *testing.T) {
+	var buf bytes.Buffer
+	enc := NewEncoder(&buf)
 	require.NoError(t, enc.Encode(&Event{
-		Fields: map[string][]byte{"retry": []byte("3000")},
-		Data:   []byte("payload"),
-		ID:     ID(""),
+		Comments: [][]byte{[]byte("note"), {}},
+		Event:    "hello",
+		Fields:   map[string][]byte{"x": []byte("1")},
+		Retry:    1500 * time.Millisecond,
+		Data:     []byte("a\r\nb"),
+		ID:       []byte{},
 	}))
-	out := buf.String()
-	assert.Contains(t, out, "retry: 3000\n")
-	assert.Contains(t, out, "data: payload\n")
-	assert.Contains(t, out, "id\n") // empty id renders as bare "id"
+	require.NoError(t, enc.Comment(""))
+	require.NoError(t, enc.Encode(&Event{Data: []byte("c"), ID: []byte("7")}))
+	assert.Equal(t, ": note\n:\nevent: hello\nx: 1\nretry: 1500\ndata: a\ndata: b\nid\n\n:\ndata: c\nid: 7\n\n", buf.String())
 }

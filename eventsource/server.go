@@ -1,3 +1,6 @@
+// Package eventsource is a reference EventSource server built on package sse.
+// It keeps an in-memory log of events and replays missed events to clients that
+// reconnect with Last-Event-ID.
 package eventsource
 
 import (
@@ -24,32 +27,33 @@ func (s *sub) notify() {
 	}
 }
 
-// Server is an example of how a server could be built around the sse package.
-// It is purposefully not very customizable. The event log is kept in memory and is unbounded.
+// Server publishes events to every connected client. It implements http.Handler.
 type Server struct {
-	upgrader *sse.Upgrader
+	// Heartbeat is the interval between keep-alive comments on idle streams. Zero disables them.
+	Heartbeat time.Duration
 
 	subs  map[int]*sub
-	subId int
+	subID int
 	mu    sync.Mutex
 
-	elog *eventLog
-
-	currentId atomic.Int64
+	elog      *eventLog
+	currentID atomic.Int64
 }
 
-func NewServer(u *sse.Upgrader) *Server {
+// NewServer returns a Server that keeps the newest logSize events for replay.
+// A logSize of zero or less keeps every event.
+func NewServer(logSize int) *Server {
 	s := &Server{
-		upgrader: u,
-		subs:     map[int]*sub{},
-		elog:     newEventLog(),
+		Heartbeat: 30 * time.Second,
+		subs:      map[int]*sub{},
+		elog:      newEventLog(logSize),
 	}
-	s.currentId.Store(time.Now().UnixMilli())
+	s.currentID.Store(time.Now().UnixMilli())
 	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r)
+	stream, err := sse.Upgrade(w, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -57,14 +61,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	newSub := &sub{wake: make(chan struct{}, 1)}
 	// resume after the client's last seen id if it sent a valid one
-	if id, err := strconv.ParseInt(conn.LastEventId, 10, 64); err == nil {
+	if id, err := strconv.ParseInt(stream.LastEventID, 10, 64); err == nil {
 		newSub.lastid = id
 	}
 	newSub.notify()
 
 	s.mu.Lock()
-	id := s.subId
-	s.subId++
+	id := s.subID
+	s.subID++
 	s.subs[id] = newSub
 	s.mu.Unlock()
 	defer func() {
@@ -73,12 +77,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
+	var heartbeat <-chan time.Time
+	if s.Heartbeat > 0 {
+		t := time.NewTicker(s.Heartbeat)
+		defer t.Stop()
+		heartbeat = t.C
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat:
+			if err := stream.Comment(""); err != nil {
+				return
+			}
 		case <-newSub.wake:
-			if err := s.flush(conn, newSub); err != nil {
+			if err := s.flush(stream, newSub); err != nil {
 				return
 			}
 		}
@@ -87,7 +101,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // flush writes every event the subscriber has not seen yet.
 // A new subscriber with no Last-Event-ID only gets the latest event.
-func (s *Server) flush(conn *sse.EventSink, v *sub) error {
+func (s *Server) flush(stream *sse.Stream, v *sub) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	var pending []*savedMessage
@@ -102,8 +116,7 @@ func (s *Server) flush(conn *sse.EventSink, v *sub) error {
 		})
 	}
 	for _, m := range pending {
-		msg := m.shell
-		if err := conn.Encode(&msg); err != nil {
+		if err := stream.Send(m.ev); err != nil {
 			return err
 		}
 		v.lastid = m.id
@@ -111,21 +124,14 @@ func (s *Server) flush(conn *sse.EventSink, v *sub) error {
 	return nil
 }
 
-// Encode stores p in the event log and sends it to every subscriber.
-// The event id is assigned by the server and overrides p.ID.
-func (s *Server) Encode(p *sse.Event) error {
-	id := s.currentId.Add(1)
-	sm := &savedMessage{
-		shell: *p,
-		id:    id,
-	}
-	sm.shell.ID = sse.ID(strconv.FormatInt(id, 10))
-	s.elog.add(sm)
-	s.broadcast()
-	return nil
-}
+// Publish stores a copy of ev in the event log and sends it to every client.
+// The server assigns the event id, replacing ev.ID.
+func (s *Server) Publish(ev *sse.Event) {
+	id := s.currentID.Add(1)
+	c := ev.Clone()
+	c.ID = strconv.AppendInt(nil, id, 10)
+	s.elog.add(&savedMessage{ev: c, id: id})
 
-func (s *Server) broadcast() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, v := range s.subs {
