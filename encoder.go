@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"bytes"
 	"io"
 )
 
@@ -9,30 +10,32 @@ func ID(x string) *[]byte {
 	return &xb
 }
 
-// Encoder works at a higher level than the encoder.
-// it works on the packet level.
+// Encoder writes whole events. Each event is built in memory and sent to the
+// underlying writer in a single Write, so a stream never holds a partial event.
+// It is not thread safe.
 type Encoder struct {
-	wr *Writer
+	out io.Writer
+	buf bytes.Buffer
+	wr  *Writer
 }
 
-func NewEncoder(w io.Writer) *Encoder {
-	wr := NewWriter(w)
-	return &Encoder{
-		wr: wr,
-	}
+func NewEncoder(w io.Writer, opts ...Option) *Encoder {
+	e := &Encoder{out: w}
+	e.wr = NewWriter(&e.buf, opts...)
+	return e
 }
 
 func (e *Encoder) Encode(p *Event) error {
+	e.buf.Reset()
+	e.wr.es = writeState{}
 	if len(p.Event) > 0 {
 		if err := e.wr.Field([]byte("event"), p.Event); err != nil {
 			return err
 		}
 	}
-	if p.Fields != nil {
-		for k, v := range p.Fields {
-			if err := e.wr.Field([]byte(k), v); err != nil {
-				return err
-			}
+	for k, v := range p.Fields {
+		if err := e.wr.Field([]byte(k), v); err != nil {
+			return err
 		}
 	}
 	if p.Data != nil {
@@ -40,9 +43,8 @@ func (e *Encoder) Encode(p *Event) error {
 			return err
 		}
 	}
-	// flush the end of data to make sure we are safe to write an id
-	err := e.wr.Flush()
-	if err != nil {
+	// end the data line so the id goes on its own line
+	if err := e.wr.Flush(); err != nil {
 		return err
 	}
 	if p.ID != nil {
@@ -53,6 +55,6 @@ func (e *Encoder) Encode(p *Event) error {
 	if err := e.wr.Next(); err != nil {
 		return err
 	}
-
-	return nil
+	_, err := e.out.Write(e.buf.Bytes())
+	return err
 }

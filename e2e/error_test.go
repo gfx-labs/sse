@@ -85,8 +85,8 @@ func TestEncoderEncodeFieldsWriteError(t *testing.T) {
 }
 
 func TestEncoderEncodeIDWriteError(t *testing.T) {
-	// Need to get past the Flush before ID — use a writer that fails after N writes
-	enc := sse.NewEncoder(&failAfterN{n: 1})
+	// the encoder sends each event in one Write, so a failing first write must surface
+	enc := sse.NewEncoder(&failAfterN{n: 0})
 	err := enc.Encode(&sse.Event{ID: sse.ID("1")})
 	require.Error(t, err)
 }
