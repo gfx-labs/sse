@@ -8,4 +8,6 @@ var (
 	ErrStreamingNotSupported = errors.New("streaming not supported")
 	ErrUnknownTokenType      = errors.New("unknown token type")
 	ErrInvalidToken          = errors.New("invalid token")
+	ErrLineTooLong           = errors.New("line exceeds max buffer size")
+	ErrInvalidField          = errors.New("field name or value contains a line break or invalid character")
 )

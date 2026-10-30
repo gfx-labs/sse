@@ -12,15 +12,17 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	req, err := http.NewRequest("GET", "http://localhost:8080/sse", nil)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-
-	err = sse.Subscribe(context.Background(), req, func(msg *sse.Event) {
+	err = sse.Subscribe(ctx, req, func(msg *sse.Event) {
 		log.Printf("msg: %s", string(msg.Data))
 	})
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
-	<-done
+	if err != nil && ctx.Err() == nil {
+		log.Fatal(err)
+	}
 }

@@ -15,11 +15,13 @@ func NewDecoder(r *Reader) *Decoder {
 	}
 }
 
+// Decode reads the next event into e, replacing its previous contents.
 func (d *Decoder) Decode(e *Event) error {
 	if e == nil {
 		panic("cannot pass nil event into (*sse.Decoder).Decode")
 	}
-	buf := &bytes.Buffer{}
+	*e = Event{}
+	var buf bytes.Buffer
 	defer func() {
 		e.Data = buf.Bytes()
 	}()
@@ -32,75 +34,56 @@ func (d *Decoder) Decode(e *Event) error {
 		switch tok.Type {
 		case TokenInvalid:
 			return ErrInvalidToken
-		case TokenBom:
-			// ignore bom
+		case TokenBom, TokenSkip:
 			continue
 		case TokenComment:
 			e.Comments = append(e.Comments, copyBytes(tok.Value))
 			continue
 		case TokenDispatch:
 			// Trim the last "\n" per the spec.
-			if buf.Len() > 0 {
-				if buf.Bytes()[buf.Len()-1] == '\n' {
-					buf.Truncate(buf.Len() - 1)
-				}
+			if buf.Len() > 0 && buf.Bytes()[buf.Len()-1] == '\n' {
+				buf.Truncate(buf.Len() - 1)
 			}
 			return nil
-		case TokenSkip:
-			continue
+		case TokenField:
 		default:
 			return fmt.Errorf("%w: %d", ErrUnknownTokenType, tok.Type)
-		case TokenField:
 		}
-		// at this point it's a field,
 
-		line := tok.Value
-		switch {
-		case bytes.HasPrefix(line, headerID):
-			idBytes := append([]byte(nil), trimField(len(headerID), line)...)
-			e.ID = &idBytes
-		case bytes.HasPrefix(line, headerData):
-			// The spec allows for multiple data fields per event, concatenated them with "\n".
-			buf.Write(append(trimField(len(headerData), line), byte('\n')))
-		// The spec says that a line that simply contains the string "data" should be treated as a data field with an empty body.
-		case bytes.Equal(line, bytes.TrimSuffix(headerData, []byte(":"))):
-			buf.WriteRune('\n')
-		case bytes.HasPrefix(line, headerEvent):
-			e.Event = copyBytes(trimField(len(headerEvent), line))
-		case bytes.HasPrefix(line, headerRetry):
+		name, value := splitField(tok.Value)
+		switch string(name) {
+		case "id":
+			// the spec ignores ids containing NULL
+			if bytes.IndexByte(value, 0) >= 0 {
+				continue
+			}
+			id := copyBytes(value)
+			e.ID = &id
+		case "data":
+			buf.Write(value)
+			buf.WriteByte('\n')
+		case "event":
+			e.Event = copyBytes(value)
+		default:
 			if e.Fields == nil {
 				e.Fields = make(map[string][]byte)
 			}
-			e.Fields["retry"] = copyBytes(trimField(len(headerEvent), line))
-		default:
-			// this is a custom header. extract it from the stream
-			splt := bytes.SplitN(line, []byte(":"), 2)
-			var header []byte
-			var topic []byte
-			header = splt[0]
-			if len(splt) == 2 {
-				topic = bytes.TrimSpace(splt[1])
-			}
-			e.Fields[string(header)] = copyBytes(topic)
+			e.Fields[string(name)] = copyBytes(value)
 		}
 	}
 }
 
-func trimField(size int, data []byte) []byte {
-	if data == nil || len(data) < size {
-		return data
+// splitField splits a line into name and value at the first colon,
+// removing a single leading space from the value as the spec requires.
+func splitField(line []byte) (name, value []byte) {
+	name, value, found := bytes.Cut(line, []byte(":"))
+	if !found {
+		return line, nil
 	}
-
-	data = data[size:]
-	// Remove optional leading whitespace
-	if len(data) > 0 && data[0] == 32 {
-		data = data[1:]
+	if len(value) > 0 && value[0] == ' ' {
+		value = value[1:]
 	}
-	// Remove trailing new line
-	if len(data) > 0 && data[len(data)-1] == 10 {
-		data = data[:len(data)-1]
-	}
-	return data
+	return name, value
 }
 
 func copyBytes(xs []byte) []byte {

@@ -2,6 +2,7 @@ package eventsource
 
 import (
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,13 +11,21 @@ import (
 )
 
 type sub struct {
-	lastid int
-	msgs   chan *sse.Event
 	mu     sync.Mutex
+	lastid int64
+	// wake has capacity 1 so a broadcast never blocks and never gets lost
+	wake chan struct{}
+}
+
+func (s *sub) notify() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Server is an example of how a server could be built around the sse package.
-// it is purposefully not very customizable
+// It is purposefully not very customizable. The event log is kept in memory and is unbounded.
 type Server struct {
 	upgrader *sse.Upgrader
 
@@ -46,95 +55,80 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newSub := &sub{
-		msgs: make(chan *sse.Event, 128),
+	newSub := &sub{wake: make(chan struct{}, 1)}
+	// resume after the client's last seen id if it sent a valid one
+	if id, err := strconv.ParseInt(conn.LastEventId, 10, 64); err == nil {
+		newSub.lastid = id
 	}
+	newSub.notify()
+
 	s.mu.Lock()
 	id := s.subId
 	s.subId++
 	s.subs[id] = newSub
 	s.mu.Unlock()
-
 	defer func() {
 		s.mu.Lock()
 		delete(s.subs, id)
 		s.mu.Unlock()
 	}()
-	s.broadcast()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		default:
-		}
-		select {
-		case m := <-newSub.msgs:
-			err := conn.Encode(m)
-			if err != nil {
+		case <-newSub.wake:
+			if err := s.flush(conn, newSub); err != nil {
 				return
 			}
-		case <-r.Context().Done():
-			return
 		}
 	}
 }
 
+// flush writes every event the subscriber has not seen yet.
+// A new subscriber with no Last-Event-ID only gets the latest event.
+func (s *Server) flush(conn *sse.EventSink, v *sub) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var pending []*savedMessage
+	if v.lastid == 0 {
+		if m, ok := s.elog.latest(); ok {
+			pending = append(pending, m)
+		}
+	} else {
+		s.elog.after(v.lastid, func(m *savedMessage) bool {
+			pending = append(pending, m)
+			return true
+		})
+	}
+	for _, m := range pending {
+		msg := m.shell
+		if err := conn.Encode(&msg); err != nil {
+			return err
+		}
+		v.lastid = m.id
+	}
+	return nil
+}
+
+// Encode stores p in the event log and sends it to every subscriber.
+// The event id is assigned by the server and overrides p.ID.
 func (s *Server) Encode(p *sse.Event) error {
-	// now take the payload and put it with the shell
+	id := s.currentId.Add(1)
 	sm := &savedMessage{
 		shell: *p,
-		id:    int(s.currentId.Add(1)),
+		id:    id,
 	}
-	s.elog.events.Set(sm)
+	sm.shell.ID = sse.ID(strconv.FormatInt(id, 10))
+	s.elog.add(sm)
 	s.broadcast()
 	return nil
 }
 
 func (s *Server) broadcast() {
-	if s.elog.events.Len() == 0 {
-		return
-	}
 	s.mu.Lock()
-	subs := make([]*sub, 0, len(s.subs))
+	defer s.mu.Unlock()
 	for _, v := range s.subs {
-		subs = append(subs, v)
-	}
-	s.mu.Unlock()
-	for _, v := range subs {
-		func() {
-			v.mu.Lock()
-			defer v.mu.Unlock()
-			curId := v.lastid
-			// if no id, just send the most recent value
-			if curId == 0 {
-				if currentValue, ok := s.elog.events.Max(); ok {
-					msg := currentValue.shell
-					select {
-					case v.msgs <- &msg:
-						v.lastid = currentValue.id
-					default:
-						return
-					}
-				}
-				return
-			}
-			// otherwise, send anything missing to the head to each subscriber
-			// if the listeners buffer becomes full, they get skipped, so this wont block
-			s.elog.events.Ascend(&savedMessage{
-				id: curId,
-			}, func(currentValue *savedMessage) bool {
-				if currentValue.id == curId {
-					return true
-				}
-				msg := currentValue.shell
-				select {
-				case v.msgs <- &msg:
-					v.lastid = currentValue.id
-					return true
-				default:
-					return false
-				}
-			})
-		}()
+		v.notify()
 	}
 }

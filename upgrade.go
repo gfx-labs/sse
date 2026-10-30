@@ -35,7 +35,7 @@ func (u *Upgrader) Upgrade(wr http.ResponseWriter, r *http.Request) (*EventSink,
 	}
 	o.LastEventId = r.Header.Get("Last-Event-ID")
 
-	wr.Header().Add("Content-Type", "text/event-stream")
+	wr.Header().Set("Content-Type", "text/event-stream")
 	wr.Header().Set("Cache-Control", "no-cache")
 	wr.Header().Set("Connection", "keep-alive")
 	wr.WriteHeader(200)

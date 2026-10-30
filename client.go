@@ -5,32 +5,33 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"sync"
 
 	"github.com/cenkalti/backoff/v4"
 )
 
-var (
-	headerID    = []byte("id:")
-	headerData  = []byte("data:")
-	headerEvent = []byte("event:")
-	headerRetry = []byte("retry:")
-)
-
-// Subscribe to a data stream with context. the handler is called on every event. it exits on any error
+// Subscribe to a data stream with context. The handler is called on every event.
+// It returns nil when the server closes the stream and an error on any failure.
+// The Event passed to handler is reused, so copy it to keep it past the call.
+// Pass WithHTTPClient to use a client other than http.DefaultClient.
 func Subscribe(ctx context.Context, r *http.Request, handler func(msg *Event), opts ...Option) error {
+	o := newOptions(opts)
 	req := AddSSEHeaders(ctx, r, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := o.client().Do(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		bts, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s: %s", http.StatusText(resp.StatusCode), bts)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		bts, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return backoffError(resp.StatusCode, fmt.Errorf("%s: %s", http.StatusText(resp.StatusCode), bts))
 	}
-	reader := NewReader(resp.Body, opts...)
-	dec := NewDecoder(reader)
+	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "text/event-stream" {
+		return backoff.Permanent(fmt.Errorf("%w: %q", ErrInvalidContentType, resp.Header.Get("Content-Type")))
+	}
+	dec := NewDecoder(NewReader(resp.Body, opts...))
 	msg := &Event{}
 	for {
 		// on any sort of error while decoding, we close the connection.
@@ -39,18 +40,27 @@ func Subscribe(ctx context.Context, r *http.Request, handler func(msg *Event), o
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return err
 		}
-
-		// Send downstream if the event has something useful
 		if msg.hasContent() {
 			handler(msg)
 		}
 	}
 }
 
-// SubscribeWIthRetry uses user specified reconnection strategy or default to standard NewExponentialBackOff() reconnection method
-// it keeps track of the last id
+// backoffError marks client errors other than 408 and 429 as permanent so retries stop.
+func backoffError(status int, err error) error {
+	if status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests {
+		return backoff.Permanent(err)
+	}
+	return err
+}
+
+// SubscribeWithRetry resubscribes using strategy, or an exponential backoff when strategy is nil.
+// It sends the last seen event id on reconnect and stops when ctx is done.
 func SubscribeWithRetry(
 	ctx context.Context,
 	factory func() *http.Request,
@@ -58,39 +68,47 @@ func SubscribeWithRetry(
 	strategy backoff.BackOff,
 	opts ...Option,
 ) error {
+	var mu sync.Mutex
 	var lastID *string
 	wrapHandler := func(msg *Event) {
-		// keep track of the last id for resubscription
 		if msg.ID != nil {
 			idString := string(*msg.ID)
+			mu.Lock()
 			lastID = &idString
+			mu.Unlock()
 		}
 		handler(msg)
 	}
 	operation := func() error {
-		req := AddSSEHeaders(ctx, factory(), lastID)
-		return Subscribe(ctx, req, wrapHandler, opts...)
+		mu.Lock()
+		id := lastID
+		mu.Unlock()
+		err := Subscribe(ctx, AddSSEHeaders(ctx, factory(), id), wrapHandler, opts...)
+		if ctx.Err() != nil {
+			return backoff.Permanent(ctx.Err())
+		}
+		if err == nil {
+			// the server closed the stream; reconnect per the spec
+			return io.ErrUnexpectedEOF
+		}
+		return err
 	}
-	var err error
-	var ReconnectNotify backoff.Notify
-	if strategy != nil {
-		err = backoff.RetryNotify(operation, strategy, ReconnectNotify)
-	} else {
-		err = backoff.RetryNotify(operation, backoff.NewExponentialBackOff(), ReconnectNotify)
+	if strategy == nil {
+		strategy = backoff.NewExponentialBackOff()
 	}
-	return err
+	return backoff.Retry(operation, backoff.WithContext(strategy, ctx))
 }
 
+// AddSSEHeaders returns a copy of r bound to ctx with the event stream request headers set.
 func AddSSEHeaders(ctx context.Context, r *http.Request, lastID *string) *http.Request {
-	req := r.WithContext(ctx)
+	req := r.Clone(ctx)
 
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Connection", "keep-alive")
 
 	if lastID != nil && len(*lastID) > 0 && req.Header.Get("Last-Event-ID") == "" {
 		req.Header.Set("Last-Event-ID", *lastID)
 	}
 
-	return r
+	return req
 }

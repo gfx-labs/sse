@@ -79,6 +79,10 @@ func (e *Writer) Field(name []byte, topic []byte) error {
 			return ErrInvalidUTF8Bytes
 		}
 	}
+	// a line break would end the field early and let the value inject extra fields
+	if len(name) == 0 || bytes.ContainsAny(name, "\r\n:") || bytes.ContainsAny(topic, "\r\n") {
+		return ErrInvalidField
+	}
 	if len(topic) > 0 {
 		if _, err := e.w.Write(name); err != nil {
 			return err
@@ -144,11 +148,11 @@ func (e *Writer) Write(xs []byte) (n int, err error) {
 		}
 		// if success, note that we wrote another byte
 		n++
-		if x == '\n' {
-			// end message if it's a newline always
+		switch x {
+		case '\n':
 			e.es.inMessage = false
-		} else if x == '\r' {
-			// if x is a carriage return, mark it as trailing carriage
+		case '\r':
+			// a following '\n' is part of the same line break
 			e.es.trailingCarriage = true
 			e.es.inMessage = false
 		}

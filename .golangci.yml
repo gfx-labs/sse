@@ -1,15 +1,13 @@
-linters:
-  enable-all: true
-  disable:
-    - gofmt
-    - gofumpt
-    - goimports
-    - golint # deprecated
-    - interfacer # deprecated
-    - maligned # deprecated
-    - scopelint # deprecated
-    - varnamelen
+version: "2"
 
-linters-settings:
-  govet:
-    enable-all: true
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - unconvert
+
+formatters:
+  enable:
+    - gofmt

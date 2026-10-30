@@ -10,21 +10,19 @@ import (
 type TokenType rune
 
 func (t TokenType) String() string {
-	switch rune(t) {
-	case 0:
+	switch t {
+	case TokenInvalid:
 		return "invalid"
-	case 1:
+	case TokenSkip:
 		return "skip"
-	case 2:
+	case TokenBom:
 		return "bom"
-	case 3:
+	case TokenComment:
 		return "comment"
-	case 4:
+	case TokenField:
 		return "field"
-	case 5:
+	case TokenDispatch:
 		return "dispatch"
-	case 6:
-		return "closed"
 	default:
 		return fmt.Sprintf("unknown (%d)", rune(t))
 	}
@@ -38,6 +36,8 @@ const (
 	TokenField
 	TokenDispatch
 )
+
+var bom = []byte{0xEF, 0xBB, 0xBF}
 
 type Token struct {
 	Type  TokenType
@@ -58,16 +58,12 @@ type readerState struct {
 	tok             *Token
 }
 
-// The reader is more like a lexer :p
-// it is not thread safe.
+// Reader splits an event stream into line tokens. It is not thread safe.
 type Reader struct {
-	r       *bufio.Reader
-	rs      readerState
-	readBuf []byte
-
-	cur      bytes.Buffer
-	leftover bytes.Buffer
-	o        Options
+	r   *bufio.Reader
+	rs  readerState
+	cur bytes.Buffer
+	o   Options
 }
 
 func NewReader(r io.Reader, opts ...Option) *Reader {
@@ -76,119 +72,77 @@ func NewReader(r io.Reader, opts ...Option) *Reader {
 		v(o)
 	}
 	return &Reader{
-		r:       bufio.NewReader(r),
-		readBuf: make([]byte, 4096),
-		o:       *o,
+		r: bufio.NewReader(r),
+		o: *o,
 	}
 }
 
-// returns the current token
+// Token returns the current token. It is only valid until the next call to Next.
 func (r *Reader) Token() *Token {
 	return r.rs.tok
 }
 
-// Token is only valid until the next call to Next()
+// Next advances to the next token. Lines may end in "\r\n", "\n" or "\r".
+// If a max buffer size is set, a line longer than it returns ErrLineTooLong.
 func (r *Reader) Next() error {
 	r.rs.tok = nil
-	rd := r.r
-	if r.o.MaxBufferSize() > 0 {
-		allowedToRead := r.o.MaxBufferSize() - r.cur.Len()
-		if allowedToRead <= 0 {
-			return io.EOF
-		}
-		rd = bufio.NewReader(io.LimitReader(r.r, int64(allowedToRead)))
-	}
+	r.cur.Reset()
 
-	// this can only happen on the first write
 	if !r.rs.triedBom {
 		r.rs.triedBom = true
-		//  read the first byte and determine if its bom
-		maybeBom, _, err := rd.ReadRune()
-		if err != nil {
-			return err
-		}
-		_, err = r.cur.WriteRune(maybeBom)
-		if err != nil {
-			return err
-		}
-		if maybeBom == '\uFEFF' {
-			r.cur.Reset() // reset cur here since this shouldnt be sent with the next payload, and the bom is always feff
-			r.rs.lastTokenType = TokenBom
-			r.rs.tok = &Token{
-				Type: TokenBom,
-			}
-			return nil
-		}
-		// if it's not BOM, then just keep going, assuming the first read bytes was just data.
-	}
-	for {
-		// read up to buf bytes
-		var thisRead []byte
-		// if we have leftover bytes, read those instead
-		if r.leftover.Len() > 0 {
-			thisRead = r.leftover.Bytes()
-			r.leftover.Reset()
-		} else {
-			n, err := rd.Read(r.readBuf)
-			if n == 0 && err != nil {
+		if b, err := r.r.Peek(len(bom)); err == nil && bytes.Equal(b, bom) {
+			if _, err := r.r.Discard(len(bom)); err != nil {
 				return err
 			}
-			thisRead = r.readBuf[:n]
-		}
-		for _, x := range thisRead {
-			if r.rs.tok != nil {
-				r.leftover.WriteByte(x)
-				continue
-			}
-			if r.rs.pendingCarriage {
-				// we are pending a carriage, so we need to check if the next byte is a newline
-				if x == '\n' {
-					// if it is a newline, it means that this is an \r\n line break
-					r.rs.tok = &Token{
-						Value: r.cur.Bytes(),
-					}
-					continue
-				}
-				// otherwise, this is an \r line break
-				r.rs.tok = &Token{
-					Value: r.cur.Bytes(),
-				}
-				continue
-			}
-			// if there is no pending carriage (we got here), then just check first for '\n'
-			if x == '\n' {
-				// if it is a newline here, it is an \lf break
-				r.rs.tok = &Token{
-					Value: r.cur.Bytes(),
-				}
-				continue
-			}
-			if x == '\r' {
-				// if it is \r here, then mark pendingCarriage and continue
-				r.rs.pendingCarriage = true
-				continue
-			}
-			// otherwise, just write the byte to cur
-			r.cur.WriteByte(x)
-		}
-		if r.rs.tok != nil {
-			// at this point, reset the buffer, but do not clear it so that the value can still be read
-			r.cur.Reset()
-			if len(r.rs.tok.Value) == 0 {
-				r.rs.tok.Type = TokenDispatch
-			} else if r.rs.tok.Value[0] == ':' {
-				r.rs.tok.Type = TokenComment
-			} else {
-				r.rs.tok.Type = TokenField
-			}
-			// if two dispatches in a row, we start sending skip tokens instead
-			if r.rs.lastTokenType == TokenDispatch {
-				if r.rs.tok.Type == TokenDispatch {
-					r.rs.tok.Type = TokenSkip
-				}
-			}
-			r.rs.lastTokenType = r.rs.tok.Type
+			r.rs.lastTokenType = TokenBom
+			r.rs.tok = &Token{Type: TokenBom}
 			return nil
 		}
 	}
+
+	limit := r.o.MaxBufferSize()
+	for {
+		x, err := r.r.ReadByte()
+		if err != nil {
+			return err
+		}
+		if r.rs.pendingCarriage {
+			r.rs.pendingCarriage = false
+			if x == '\n' {
+				// second half of a "\r\n" line break
+				continue
+			}
+		}
+		switch x {
+		case '\r':
+			r.rs.pendingCarriage = true
+			r.emit()
+			return nil
+		case '\n':
+			r.emit()
+			return nil
+		}
+		if limit > 0 && r.cur.Len() >= limit {
+			return ErrLineTooLong
+		}
+		r.cur.WriteByte(x)
+	}
+}
+
+func (r *Reader) emit() {
+	tok := &Token{Value: r.cur.Bytes()}
+	switch {
+	case len(tok.Value) == 0:
+		tok.Type = TokenDispatch
+	case tok.Value[0] == ':':
+		tok.Type = TokenComment
+	default:
+		tok.Type = TokenField
+	}
+	// collapse consecutive blank lines into one dispatch followed by skips
+	if tok.Type == TokenDispatch && r.rs.lastTokenType == TokenDispatch {
+		tok.Type = TokenSkip
+	}
+	r.rs.lastTokenType = tok.Type
+	r.rs.tok = tok
 }
