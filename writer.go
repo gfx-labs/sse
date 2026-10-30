@@ -16,6 +16,7 @@ var (
 	dataPrefix = []byte("data: ")
 	fieldSep   = []byte(": ")
 	idName     = []byte("id")
+	eventName  = []byte("event")
 )
 
 // Writer writes the event stream wire format directly to the underlying writer.
