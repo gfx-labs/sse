@@ -141,6 +141,7 @@ func (r *Reader) Next() error {
 				continue
 			}
 			if r.rs.pendingCarriage {
+				r.rs.pendingCarriage = false
 				// we are pending a carriage, so we need to check if the next byte is a newline
 				if x == '\n' {
 					// if it is a newline, it means that this is an \r\n line break
@@ -149,10 +150,12 @@ func (r *Reader) Next() error {
 					}
 					continue
 				}
-				// otherwise, this is an \r line break
+				// otherwise, this is an \r line break and x is the first
+				// byte of the next line — save it to leftover
 				r.rs.tok = &Token{
 					Value: r.cur.Bytes(),
 				}
+				r.leftover.WriteByte(x)
 				continue
 			}
 			// if there is no pending carriage (we got here), then just check first for '\n'
