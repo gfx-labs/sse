@@ -22,9 +22,10 @@ func BenchmarkDecode(b *testing.B) {
 
 func BenchmarkEncode(b *testing.B) {
 	ev := &Event{
-		Event: []byte("update"),
-		ID:    ID("12345"),
-		Data:  []byte("{\"price\":\"1234.5678\",\"size\":\"0.25\"}\nsecond line"),
+		Event:  []byte("update"),
+		ID:     ID("12345"),
+		Data:   []byte("{\"price\":\"1234.5678\",\"size\":\"0.25\"}\nsecond line"),
+		Fields: map[string][]byte{"retry": []byte("3000")},
 	}
 	var buf bytes.Buffer
 	if err := NewEncoder(&buf).Encode(ev); err != nil {

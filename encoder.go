@@ -29,12 +29,12 @@ func (e *Encoder) Encode(p *Event) error {
 	e.buf.Reset()
 	e.wr.es = writeState{}
 	if len(p.Event) > 0 {
-		if err := e.wr.Field(eventName, p.Event); err != nil {
+		if err := e.wr.FieldString("event", p.Event); err != nil {
 			return err
 		}
 	}
 	for k, v := range p.Fields {
-		if err := e.wr.Field([]byte(k), v); err != nil {
+		if err := e.wr.FieldString(k, v); err != nil {
 			return err
 		}
 	}
@@ -48,7 +48,7 @@ func (e *Encoder) Encode(p *Event) error {
 		return err
 	}
 	if p.ID != nil {
-		if err := e.wr.Field(idName, *p.ID); err != nil {
+		if err := e.wr.FieldString("id", *p.ID); err != nil {
 			return err
 		}
 	}
