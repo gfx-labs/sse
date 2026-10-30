@@ -36,3 +36,18 @@ func TestEncoderSimple(t *testing.T) {
 		assert.EqualValues(t, v.w, buf.String())
 	}
 }
+
+func TestEncoderFields(t *testing.T) {
+	// covers: Encoder.Encode with Fields map and empty ID
+	buf := &bytes.Buffer{}
+	enc := NewEncoder(buf)
+	require.NoError(t, enc.Encode(&Event{
+		Fields: map[string][]byte{"retry": []byte("3000")},
+		Data:   []byte("payload"),
+		ID:     ID(""),
+	}))
+	out := buf.String()
+	assert.Contains(t, out, "retry: 3000\n")
+	assert.Contains(t, out, "data: payload\n")
+	assert.Contains(t, out, "id\n") // empty id renders as bare "id"
+}

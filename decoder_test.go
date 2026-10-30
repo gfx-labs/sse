@@ -64,3 +64,19 @@ func TestReaderMaxBufferSize(t *testing.T) {
 	require.Len(t, evs, 1)
 	require.Equal(t, "short", string(evs[0].Data))
 }
+
+func TestDecoderBareData(t *testing.T) {
+	// covers: bare "data" line (no colon) => empty newline in data
+	input := "data\n\n"
+	r := NewReader(strings.NewReader(input))
+	dec := NewDecoder(r)
+	ev := &Event{}
+	require.NoError(t, dec.Decode(ev))
+	require.Equal(t, []byte(""), ev.Data)
+}
+
+func TestDecoderNilPanic(t *testing.T) {
+	r := NewReader(strings.NewReader("data: x\n\n"))
+	dec := NewDecoder(r)
+	require.Panics(t, func() { _ = dec.Decode(nil) })
+}
