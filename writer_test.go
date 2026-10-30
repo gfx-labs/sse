@@ -33,7 +33,7 @@ data: friend
 	for _, v := range cases {
 		buf := &bytes.Buffer{}
 		enc := NewWriter(buf)
-		err := enc.Field([]byte("event"), []byte(v.e))
+		err := enc.Field("event", []byte(v.e))
 		require.NoError(t, err)
 		_, err = enc.Write([]byte(v.i))
 		require.NoError(t, err)
@@ -47,7 +47,7 @@ func TestWriterUTF8Validation(t *testing.T) {
 	w := NewWriter(buf, OptionValidateUtf8(true))
 
 	// invalid UTF-8 in Field
-	err := w.Field([]byte("event"), []byte{0xff, 0xfe})
+	err := w.Field("event", []byte{0xff, 0xfe})
 	require.ErrorIs(t, err, ErrInvalidUTF8Bytes)
 
 	// invalid UTF-8 in Write
@@ -59,7 +59,7 @@ func TestWriterFieldEmptyID(t *testing.T) {
 	// covers: Field with name "id" and empty topic writes bare "id\n"
 	buf := &bytes.Buffer{}
 	w := NewWriter(buf)
-	require.NoError(t, w.Field([]byte("id"), nil))
+	require.NoError(t, w.Field("id", nil))
 	assert.Equal(t, "id\n", buf.String())
 }
 
@@ -67,7 +67,7 @@ func TestWriterFieldEmptyNonID(t *testing.T) {
 	// covers: Field with non-id name and empty topic is a no-op
 	buf := &bytes.Buffer{}
 	w := NewWriter(buf)
-	require.NoError(t, w.Field([]byte("event"), nil))
+	require.NoError(t, w.Field("event", nil))
 	assert.Equal(t, "", buf.String())
 }
 
@@ -85,7 +85,7 @@ func TestWriterMaxBufferSize(t *testing.T) {
 	// covers: OptionMaxBufferSize path in NewWriter/NewReader
 	buf := &bytes.Buffer{}
 	w := NewWriter(buf, OptionMaxBufferSize(1024))
-	require.NoError(t, w.Field([]byte("event"), []byte("test")))
+	require.NoError(t, w.Field("event", []byte("test")))
 }
 
 func TestEncoderReadFrom(t *testing.T) {
@@ -112,7 +112,7 @@ data: friend
 	for _, v := range cases {
 		buf := &bytes.Buffer{}
 		enc := NewWriter(buf)
-		err := enc.Field([]byte("event"), []byte(v.e))
+		err := enc.Field("event", []byte(v.e))
 		require.NoError(t, err)
 		_, err = enc.ReadFrom(strings.NewReader(v.i))
 		require.NoError(t, err)

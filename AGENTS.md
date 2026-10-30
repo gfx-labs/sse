@@ -93,7 +93,7 @@ func NewReader(r io.Reader, opts ...Option) *Reader
 - Use `panic` only for programmer misuse (nil arguments to methods that cannot accept them).
 
 ```go
-if err := e.wr.Field([]byte("event"), p.Event); err != nil {
+if err := e.wr.Field("event", p.Event); err != nil {
     return err
 }
 ```

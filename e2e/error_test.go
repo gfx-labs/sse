@@ -24,7 +24,7 @@ func (errWriter) Write([]byte) (int, error) {
 
 func TestWriterFieldWriteError(t *testing.T) {
 	w := sse.NewWriter(errWriter{})
-	err := w.Field([]byte("event"), []byte("x"))
+	err := w.Field("event", []byte("x"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "write failed")
 }
@@ -32,7 +32,7 @@ func TestWriterFieldWriteError(t *testing.T) {
 func TestWriterFieldTopicWriteError(t *testing.T) {
 	// Field with empty topic but name "id" still writes
 	w := sse.NewWriter(errWriter{})
-	err := w.Field([]byte("id"), nil)
+	err := w.Field("id", nil)
 	require.Error(t, err)
 }
 
@@ -173,10 +173,10 @@ func TestWriterUTF8ValidationE2E(t *testing.T) {
 	w := sse.NewWriter(buf, sse.OptionValidateUtf8(true))
 
 	// Valid UTF-8 should work
-	require.NoError(t, w.Field([]byte("event"), []byte("valid")))
+	require.NoError(t, w.Field("event", []byte("valid")))
 
 	// Invalid UTF-8 should error on Field
-	err := w.Field([]byte("event"), []byte{0xff, 0xfe})
+	err := w.Field("event", []byte{0xff, 0xfe})
 	require.ErrorIs(t, err, sse.ErrInvalidUTF8Bytes)
 
 	// Invalid UTF-8 should error on Write

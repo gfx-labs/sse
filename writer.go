@@ -58,48 +58,24 @@ func (e *Writer) Next() error {
 
 // Field writes a `name: value` line. Empty values are skipped, except for "id",
 // where an empty value resets the client's last event id.
-func (e *Writer) Field(name []byte, value []byte) error {
-	if len(name) == 0 || bytes.ContainsAny(name, "\r\n:") {
-		return ErrInvalidField
-	}
-	if skip, err := e.checkValue(len(value) == 0 && string(name) == "id", value); skip || err != nil {
-		return err
-	}
-	if err := e.write(name); err != nil {
-		return err
-	}
-	return e.fieldValue(value)
-}
-
-// FieldString is Field with a string name. The name is not copied when the
-// underlying writer implements io.StringWriter.
-func (e *Writer) FieldString(name string, value []byte) error {
+// The name is not copied when the underlying writer implements io.StringWriter.
+func (e *Writer) Field(name string, value []byte) error {
 	if len(name) == 0 || strings.ContainsAny(name, "\r\n:") {
 		return ErrInvalidField
 	}
-	if skip, err := e.checkValue(len(value) == 0 && name == "id", value); skip || err != nil {
-		return err
+	if e.o.ValidateUTF8() && !utf8.Valid(value) {
+		return ErrInvalidUTF8Bytes
+	}
+	// a line break would end the field early and let the value inject extra fields
+	if bytes.ContainsAny(value, "\r\n") {
+		return ErrInvalidField
+	}
+	if len(value) == 0 && name != "id" {
+		return nil
 	}
 	if _, err := io.WriteString(e.w, name); err != nil {
 		return err
 	}
-	return e.fieldValue(value)
-}
-
-// checkValue validates a field value and reports whether the field should be skipped.
-// Empty values are skipped unless keepEmpty is set.
-func (e *Writer) checkValue(keepEmpty bool, value []byte) (skip bool, err error) {
-	if e.o.ValidateUTF8() && !utf8.Valid(value) {
-		return true, ErrInvalidUTF8Bytes
-	}
-	// a line break would end the field early and let the value inject extra fields
-	if bytes.ContainsAny(value, "\r\n") {
-		return true, ErrInvalidField
-	}
-	return len(value) == 0 && !keepEmpty, nil
-}
-
-func (e *Writer) fieldValue(value []byte) error {
 	if len(value) > 0 {
 		if err := e.write(fieldSep); err != nil {
 			return err
