@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/gfx-labs/sse"
+	"github.com/gfx-labs/sse/eventsource"
 )
 
 func main() {
@@ -19,7 +19,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var c sse.Client
+	var c eventsource.Client
 	for ev, err := range c.Events(ctx, req) {
 		if err != nil {
 			log.Fatal(err)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gfx-labs/sse"
+	"github.com/gfx-labs/sse/eventsource"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,7 +74,7 @@ func TestRoundtripMultipleEvents(t *testing.T) {
 
 // --- Full HTTP roundtrip: Upgrade → Client ---
 
-func collect(t *testing.T, c sse.Client, url string, n int) []*sse.Event {
+func collect(t *testing.T, c eventsource.Client, url string, n int) []*sse.Event {
 	t.Helper()
 	req, err := http.NewRequest("GET", url, nil)
 	require.NoError(t, err)
@@ -102,7 +103,7 @@ func TestHTTPRoundtrip(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got := collect(t, sse.Client{DisableReconnect: true}, srv.URL, -1)
+	got := collect(t, eventsource.Client{Reconnect: eventsource.NoReconnect}, srv.URL, -1)
 	require.Len(t, got, 5)
 	for i, ev := range got {
 		assert.Equal(t, "count", ev.Event)
@@ -128,7 +129,11 @@ func TestHTTPReconnectLastEventID(t *testing.T) {
 	defer srv.Close()
 
 	var reconnects int
-	c := sse.Client{OnReconnect: func(error, time.Duration) { reconnects++ }}
+	backoff := eventsource.Backoff(time.Second, time.Second)
+	c := eventsource.Client{Reconnect: func(a eventsource.Attempt) (time.Duration, bool) {
+		reconnects++
+		return backoff(a)
+	}}
 	got := collect(t, c, srv.URL, 2)
 	require.Len(t, got, 2)
 	assert.Equal(t, "first", string(got[0].Data))
@@ -142,7 +147,7 @@ func TestHTTPNoContentStops(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
-	assert.Empty(t, collect(t, sse.Client{}, srv.URL, -1))
+	assert.Empty(t, collect(t, eventsource.Client{}, srv.URL, -1))
 }
 
 func TestUpgradeSetsHeaders(t *testing.T) {

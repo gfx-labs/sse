@@ -8,10 +8,10 @@ go get github.com/gfx-labs/sse
 
 ## Client
 
-`Client.Events` returns an iterator. It reconnects after disconnects, sends `Last-Event-ID`, and honors the server's `retry:` delay. It stops when the context ends, on a `204 No Content`, or on a response that should not be retried.
+`eventsource.Client.Events` returns an iterator. It reconnects after disconnects, sends `Last-Event-ID`, and passes the server's `retry:` delay to its reconnect policy. It stops when the context ends, on a `204 No Content`, or when the policy declines.
 
 ```go
-var c sse.Client
+var c eventsource.Client
 req, _ := http.NewRequest("GET", "http://localhost:8080/sse", nil)
 for ev, err := range c.Events(ctx, req) {
 	if err != nil {
@@ -22,6 +22,24 @@ for ev, err := range c.Events(ctx, req) {
 ```
 
 The yielded `*sse.Event` is reused for the next event. Call `ev.Clone()` to keep it.
+
+`Client.Reconnect` is a `func(eventsource.Attempt) (time.Duration, bool)` that sees the error, consecutive failure count, server retry delay and last event id, and returns the delay or false to stop. The default is `eventsource.Backoff(3*time.Second, 30*time.Second)`: exponential backoff with jitter that stops on errors `eventsource.Retryable` reports as permanent. `eventsource.NoReconnect` stops after one connection.
+
+```go
+backoff := eventsource.Backoff(time.Second, time.Minute)
+c := eventsource.Client{Reconnect: func(a eventsource.Attempt) (time.Duration, bool) {
+	if se, ok := errors.AsType[*sse.StatusError](a.Err); ok && se.Code == http.StatusUnauthorized {
+		refreshToken()
+		return 0, true
+	}
+	if a.Failures > 10 {
+		return 0, false
+	}
+	return backoff(a)
+}}
+```
+
+For one connection without reconnects, `sse.Connect(httpClient, req)` sends the request with event-stream headers and checks the status and Content-Type, returning `sse.ErrNoContent` or `*sse.StatusError`. Read the body with `sse.Events(resp.Body)`.
 
 ## Server
 

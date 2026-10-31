@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gfx-labs/sse"
+	"github.com/gfx-labs/sse/eventsource"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,17 +51,17 @@ func TestClientNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := firstErr(t, sse.Client{}, srv.URL)
+	err := firstErr(t, eventsource.Client{}, srv.URL)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "400")
 }
 
 func TestClientBadURLDisableReconnect(t *testing.T) {
-	err := firstErr(t, sse.Client{DisableReconnect: true}, "http://127.0.0.1:1")
+	err := firstErr(t, eventsource.Client{Reconnect: eventsource.NoReconnect}, "http://127.0.0.1:1")
 	require.Error(t, err)
 }
 
-func firstErr(t *testing.T, c sse.Client, url string) error {
+func firstErr(t *testing.T, c eventsource.Client, url string) error {
 	t.Helper()
 	req, err := http.NewRequest("GET", url, nil)
 	require.NoError(t, err)

@@ -4,7 +4,7 @@
 
 Go library implementing the Server-Sent Events (SSE) specification. Module path: `github.com/gfx-labs/sse`. Minimum Go version: 1.27. There are no external consumers yet, so breaking API changes are acceptable.
 
-Provides: `Encoder`/`Decoder` and the `Events` iterator (wire format), `Upgrade`/`Stream` (server side), `Client` (reconnecting consumer), and the `eventsource` sub-package (reference server with an in-memory event log and Last-Event-ID replay).
+Provides: `Encoder`/`Decoder` and the `Events` iterator (wire format), `Upgrade`/`Stream` (server side), `Connect` (one client connection), and the `eventsource` sub-package (reconnecting `Client` with a pluggable reconnect policy, and a reference server with an in-memory event log and Last-Event-ID replay).
 
 ## Commands
 
@@ -25,7 +25,7 @@ CI runs `go vet`, `go test -race ./...` and golangci-lint on push and PR to mast
 - `lineReader` (`linereader.go`) scans whole lines from its own buffer and handles `\r\n`, `\r`, `\n`, a leading BOM, and `WithMaxLineSize`.
 - `Encoder` builds each event in a reused buffer and sends it in one `Write`, so `Stream.Send` flushes whole events. Field names and values containing line breaks are rejected with `ErrInvalidField`.
 - `Upgrade` flushes through `http.NewResponseController`, so wrapped `ResponseWriter`s that implement `Unwrap` work.
-- `Client.Events` returns `iter.Seq2[*Event, error]`. It reconnects with Last-Event-ID and the server's retry delay, doubles the delay on consecutive failures up to `MaxRetry`, stops on 204, and yields a final error for non-retryable statuses or a wrong Content-Type.
+- `sse.Connect` sends one request and validates the response (`ErrNoContent`, `*StatusError`, `ErrInvalidContentType`). Reconnecting lives in `eventsource.Client.Events`, which returns `iter.Seq2[*sse.Event, error]`, resends Last-Event-ID, and asks `Client.Reconnect` (a `ReconnectFunc` taking an `Attempt`) for each delay. The default `Backoff(3s, 30s)` uses the server's retry delay, doubles it per consecutive failure, adds jitter and stops on errors `Retryable` rejects. 204 always stops without consulting the policy.
 - Hot paths should not allocate per event. Check `-benchmem` before and after changes to `decoder.go`, `encoder.go` or `linereader.go`.
 
 ## Conventions
@@ -53,7 +53,8 @@ CI runs `go vet`, `go test -race ./...` and golangci-lint on push and PR to mast
 | `decoder.go` | `Decoder`, `Events` iterator, field parsing |
 | `encoder.go` | `Encoder`, wire format output |
 | `server.go` | `Upgrade`, `Stream` |
-| `client.go` | `Client`, reconnect and backoff |
+| `client.go` | `Connect`, `StatusError` |
+| `eventsource/client.go` | reconnecting `Client`, `Backoff`, `Retryable` |
 | `options.go` | `Option`, `WithMaxLineSize`, `WithUTF8Validation` |
 | `errors.go` | Sentinel errors |
 | `eventsource/server.go` | Reference server with heartbeats and replay |

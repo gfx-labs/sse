@@ -23,7 +23,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		var c sse.Client
+		var c eventsource.Client
 		for ev, err := range c.Events(context.Background(), req) {
 			if err != nil {
 				log.Fatal(err)
