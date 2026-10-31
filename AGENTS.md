@@ -58,4 +58,4 @@ CI runs `go vet`, `go test -race ./...` and golangci-lint on push and PR to mast
 | `options.go` | `Option`, `WithMaxLineSize`, `WithUTF8Validation` |
 | `errors.go` | Sentinel errors |
 | `eventsource/server.go` | Reference server with heartbeats and replay |
-| `eventsource/event_log.go` | B-tree event log with optional size limit |
+| `eventsource/event_log.go` | Fixed-size ring buffer event log; assigns consecutive ids under its lock |

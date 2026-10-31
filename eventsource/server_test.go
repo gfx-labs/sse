@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -44,12 +45,15 @@ func TestServerLogLimit(t *testing.T) {
 
 	s.Publish(&sse.Event{Data: []byte("0")})
 	first := readEvents(t, srv.URL, "", 1)[0]
-	for range 20 {
-		s.Publish(&sse.Event{Data: []byte("x")})
+	for i := range 21 {
+		s.Publish(&sse.Event{Data: []byte(strconv.Itoa(i + 1))})
 	}
-	s.Publish(&sse.Event{Data: []byte("last")})
 	got := readEvents(t, srv.URL, string(first.ID), 5)
-	require.Equal(t, "last", string(got[4].Data))
+	var data []string
+	for _, e := range got {
+		data = append(data, string(e.Data))
+	}
+	require.Equal(t, []string{"17", "18", "19", "20", "21"}, data)
 }
 
 // Idle streams get heartbeat comments, which the decoder skips.

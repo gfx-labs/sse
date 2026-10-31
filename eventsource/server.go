@@ -7,15 +7,15 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gfx-labs/sse"
 )
 
 type sub struct {
-	mu     sync.Mutex
-	lastid int64
+	mu      sync.Mutex
+	lastid  int64
+	pending []savedMessage
 	// wake has capacity 1 so a broadcast never blocks and never gets lost
 	wake chan struct{}
 }
@@ -36,20 +36,24 @@ type Server struct {
 	subID int
 	mu    sync.Mutex
 
-	elog      *eventLog
-	currentID atomic.Int64
+	elog *eventLog
 }
 
+// DefaultLogSize is the log size NewServer uses when given zero or less.
+const DefaultLogSize = 1024
+
 // NewServer returns a Server that keeps the newest logSize events for replay.
-// A logSize of zero or less keeps every event.
+// A logSize of zero or less means DefaultLogSize.
 func NewServer(logSize int) *Server {
-	s := &Server{
+	if logSize <= 0 {
+		logSize = DefaultLogSize
+	}
+	// ids start at the current time so they keep increasing across restarts
+	return &Server{
 		Heartbeat: 30 * time.Second,
 		subs:      map[int]*sub{},
-		elog:      newEventLog(logSize),
+		elog:      newEventLog(logSize, time.Now().UnixMilli()+1),
 	}
-	s.currentID.Store(time.Now().UnixMilli())
-	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -104,17 +108,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) flush(stream *sse.Stream, v *sub) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	var pending []*savedMessage
+	pending := v.pending[:0]
 	if v.lastid == 0 {
 		if m, ok := s.elog.latest(); ok {
 			pending = append(pending, m)
 		}
 	} else {
-		s.elog.after(v.lastid, func(m *savedMessage) bool {
-			pending = append(pending, m)
-			return true
-		})
+		pending = s.elog.after(v.lastid, pending)
 	}
+	defer func() {
+		// drop event references so evicted events can be collected
+		clear(pending)
+		v.pending = pending[:0]
+	}()
 	for _, m := range pending {
 		if err := stream.Send(m.ev); err != nil {
 			return err
@@ -127,10 +133,8 @@ func (s *Server) flush(stream *sse.Stream, v *sub) error {
 // Publish stores a copy of ev in the event log and sends it to every client.
 // The server assigns the event id, replacing ev.ID.
 func (s *Server) Publish(ev *sse.Event) {
-	id := s.currentID.Add(1)
 	c := ev.Clone()
-	c.ID = strconv.AppendInt(nil, id, 10)
-	s.elog.add(&savedMessage{ev: c, id: id})
+	s.elog.add(c)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

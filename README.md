@@ -66,4 +66,4 @@ http.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
 
 ## eventsource
 
-`eventsource.NewServer(logSize)` is a reference `http.Handler` that publishes events to every client, keeps the newest `logSize` events, and replays missed events to clients that reconnect with `Last-Event-ID`. See `example/eventsource`.
+`eventsource.NewServer(logSize)` is a reference `http.Handler` that publishes events to every client, keeps the newest `logSize` events (`DefaultLogSize`, 1024, when `logSize <= 0`) in a ring buffer, and replays missed events to clients that reconnect with `Last-Event-ID`. See `example/eventsource`.
