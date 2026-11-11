@@ -8,7 +8,7 @@ go get github.com/gfx-labs/sse
 
 ## Client
 
-`eventsource.Client.Events` returns an iterator. It reconnects after disconnects, sends `Last-Event-ID`, and passes the server's `retry:` delay to its reconnect policy. It stops when the context ends, on a `204 No Content`, or when the policy declines.
+`eventsource.Client.Events` returns an iterator. It reconnects after disconnects, sends `Last-Event-ID`, and passes the server's `retry:` delay to its reconnect policy. It stops when the context ends, on a `204 No Content`, or when the policy declines. A `Last-Event-ID` header on the request is the starting point.
 
 ```go
 var c eventsource.Client
@@ -23,7 +23,7 @@ for ev, err := range c.Events(ctx, req) {
 
 The yielded `*sse.Event` is reused for the next event. Call `ev.Clone()` to keep it.
 
-`Client.Reconnect` is a `func(eventsource.Attempt) (time.Duration, bool)` that sees the error, consecutive failure count, server retry delay and last event id, and returns the delay or false to stop. The default is `eventsource.Backoff(3*time.Second, 30*time.Second)`: exponential backoff with jitter that stops on errors `eventsource.Retryable` reports as permanent. `eventsource.NoReconnect` stops after one connection.
+`Client.Reconnect` is a `func(eventsource.Attempt) (time.Duration, bool)` that sees the error, consecutive failure count, server retry delay and last event id, and returns the delay or false to stop. `Attempt.Failures` counts connections that ended before the server answered with an event stream, so it is 1 after any stream that was established. The default is `eventsource.Backoff(3*time.Second, 30*time.Second)`: exponential backoff with jitter that stops on errors `eventsource.Retryable` reports as permanent, including requests `net/http` refuses to send. A server `retry:` delay above the maximum is used as is. `eventsource.NoReconnect` stops after one connection.
 
 ```go
 backoff := eventsource.Backoff(time.Second, time.Minute)
@@ -60,10 +60,21 @@ http.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
 
 `stream.LastEventID` holds the id a reconnecting client sent. `stream.Comment("")` writes a keep-alive.
 
+`Upgrade` clears the write deadline set by `http.Server.WriteTimeout`, which would otherwise end the stream. Use `stream.SetWriteDeadline` to bound a write to a slow client. `sse.ErrStreamingNotSupported` means the `ResponseWriter` cannot flush and nothing was written, so the handler can still send an error status.
+
 ## Encoding and decoding
 
 `NewEncoder` and `NewDecoder` work on any `io.Writer` and `io.Reader`. `sse.Events(r)` iterates over the events in a reader. Neither allocates per event in steady state.
 
 ## eventsource
 
-`eventsource.NewServer(logSize)` is a reference `http.Handler` that publishes events to every client, keeps the newest `logSize` events (`DefaultLogSize`, 1024, when `logSize <= 0`) in a ring buffer, and replays missed events to clients that reconnect with `Last-Event-ID`. See `example/eventsource`.
+`eventsource.NewServer(logSize)` is a reference `http.Handler` that publishes events to every client, keeps the newest `logSize` events (`DefaultLogSize`, 1024, when `logSize <= 0`) in a ring buffer, and replays missed events to clients that reconnect with `Last-Event-ID`. A client without an id from this server gets the latest event and then everything published after it connected. See `example/eventsource`.
+
+`Publish` returns an error, such as `sse.ErrInvalidField`, for an event that cannot be encoded, and does not store it. `Server.WriteTimeout` (30 seconds by default) ends a stream whose client stops reading.
+
+`http.Server.Shutdown` waits for open streams, so close the event source when shutdown starts:
+
+```go
+es := eventsource.NewServer(0)
+httpServer.RegisterOnShutdown(es.Close)
+```
