@@ -43,13 +43,20 @@ func (l *eventLog) add(ev *sse.Event) {
 	}
 }
 
-func (l *eventLog) latest() (savedMessage, bool) {
+// cursor returns the id a subscriber that sent lastEventID resumes after. A
+// subscriber without an id this log has reached starts just before the latest
+// event, so it gets that event and every later one.
+func (l *eventLog) cursor(lastEventID string) int64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	if l.n == 0 {
-		return savedMessage{}, false
+	// an id from the future, such as one from another server, would wait forever
+	if id, err := strconv.ParseInt(lastEventID, 10, 64); err == nil && id < l.next {
+		return id
 	}
-	return l.buf[(l.head+l.n-1)%len(l.buf)], true
+	if l.n == 0 {
+		return l.next - 1
+	}
+	return l.next - 2
 }
 
 // after appends each stored message with an id greater than id to dst, in order.
@@ -60,9 +67,12 @@ func (l *eventLog) after(id int64, dst []savedMessage) []savedMessage {
 	if l.n == 0 {
 		return dst
 	}
-	oldest := l.buf[l.head].id
-	skip := max(id+1-oldest, 0)
-	for i := int(min(skip, int64(l.n))); i < l.n; i++ {
+	skip := 0
+	// comparing before subtracting keeps an extreme id from overflowing
+	if oldest := l.buf[l.head].id; id >= oldest {
+		skip = int(min(id-oldest, int64(l.n-1))) + 1
+	}
+	for i := skip; i < l.n; i++ {
 		dst = append(dst, l.buf[(l.head+i)%len(l.buf)])
 	}
 	return dst

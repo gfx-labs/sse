@@ -4,80 +4,92 @@
 package eventsource
 
 import (
+	"errors"
+	"io"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gfx-labs/sse"
 )
 
-type sub struct {
-	mu      sync.Mutex
-	lastid  int64
-	pending []savedMessage
-	// wake has capacity 1 so a broadcast never blocks and never gets lost
-	wake chan struct{}
-}
-
-func (s *sub) notify() {
-	select {
-	case s.wake <- struct{}{}:
-	default:
-	}
-}
-
 // Server publishes events to every connected client. It implements http.Handler.
+// Create one with NewServer. Publish, Close and ServeHTTP may be called from
+// multiple goroutines. Set the exported fields before serving.
+//
+// A client that falls more than the log size behind skips the events it missed.
 type Server struct {
-	// Heartbeat is the interval between keep-alive comments on idle streams. Zero disables them.
+	// Heartbeat is the interval between keep-alive comments. Zero disables them.
 	Heartbeat time.Duration
+	// WriteTimeout ends a stream whose client does not accept an event or
+	// keep-alive within this time. Zero means a stalled client holds its handler
+	// until the connection fails.
+	WriteTimeout time.Duration
 
-	subs  map[int]*sub
-	subID int
-	mu    sync.Mutex
+	mu sync.Mutex
+	// each subscriber's wake channel has capacity 1 so a broadcast never blocks and never gets lost
+	subs map[chan struct{}]struct{}
+	// check encodes published events to reject those a stream could not send
+	check *sse.Encoder
 
-	elog *eventLog
+	elog      *eventLog
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // DefaultLogSize is the log size NewServer uses when given zero or less.
 const DefaultLogSize = 1024
 
 // NewServer returns a Server that keeps the newest logSize events for replay.
-// A logSize of zero or less means DefaultLogSize.
+// A logSize of zero or less means DefaultLogSize. Heartbeat and WriteTimeout
+// start at 30 seconds.
 func NewServer(logSize int) *Server {
 	if logSize <= 0 {
 		logSize = DefaultLogSize
 	}
 	// ids start at the current time so they keep increasing across restarts
 	return &Server{
-		Heartbeat: 30 * time.Second,
-		subs:      map[int]*sub{},
-		elog:      newEventLog(logSize, time.Now().UnixMilli()+1),
+		Heartbeat:    30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		subs:         map[chan struct{}]struct{}{},
+		check:        sse.NewEncoder(io.Discard),
+		elog:         newEventLog(logSize, time.Now().UnixMilli()+1),
+		done:         make(chan struct{}),
 	}
 }
 
+// ServeHTTP streams events until the client disconnects or Close is called. A
+// client whose Last-Event-ID is an id this server has reached gets every later
+// event still in the log. Any other client, including one with an id from
+// another server, gets the latest event, then every event published after the
+// response headers were sent.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	select {
+	case <-s.done:
+		http.Error(w, "event source closed", http.StatusServiceUnavailable)
+		return
+	default:
+	}
+	// taken before the headers are sent, so nothing published after the client sees them is missed
+	cursor := s.elog.cursor(r.Header.Get("Last-Event-ID"))
 	stream, err := sse.Upgrade(w, r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// after any other error the response has already started
+		if errors.Is(err, sse.ErrStreamingNotSupported) {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
-	newSub := &sub{wake: make(chan struct{}, 1)}
-	// resume after the client's last seen id if it sent a valid one
-	if id, err := strconv.ParseInt(stream.LastEventID, 10, 64); err == nil {
-		newSub.lastid = id
-	}
-	newSub.notify()
-
+	wake := make(chan struct{}, 1)
+	// the first pass sends what the log already holds
+	wake <- struct{}{}
 	s.mu.Lock()
-	id := s.subID
-	s.subID++
-	s.subs[id] = newSub
+	s.subs[wake] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.subs, id)
+		delete(s.subs, wake)
 		s.mu.Unlock()
 	}()
 
@@ -87,58 +99,72 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer t.Stop()
 		heartbeat = t.C
 	}
+	var pending []savedMessage
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.done:
+			return
 		case <-heartbeat:
+			s.setWriteDeadline(stream)
 			if err := stream.Comment(""); err != nil {
 				return
 			}
-		case <-newSub.wake:
-			if err := s.flush(stream, newSub); err != nil {
-				return
+		case <-wake:
+			pending = s.elog.after(cursor, pending[:0])
+			for _, m := range pending {
+				s.setWriteDeadline(stream)
+				if err := stream.Send(m.ev); err != nil {
+					return
+				}
+				cursor = m.id
 			}
+			// drop event references so evicted events can be collected
+			clear(pending)
+		}
+		if s.WriteTimeout > 0 {
+			// HTTP/2 resets the stream when a deadline passes, even an idle one
+			_ = stream.SetWriteDeadline(time.Time{})
 		}
 	}
 }
 
-// flush writes every event the subscriber has not seen yet.
-// A new subscriber with no Last-Event-ID only gets the latest event.
-func (s *Server) flush(stream *sse.Stream, v *sub) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	pending := v.pending[:0]
-	if v.lastid == 0 {
-		if m, ok := s.elog.latest(); ok {
-			pending = append(pending, m)
-		}
-	} else {
-		pending = s.elog.after(v.lastid, pending)
+func (s *Server) setWriteDeadline(stream *sse.Stream) {
+	if s.WriteTimeout > 0 {
+		// a ResponseWriter without deadlines keeps streaming without the timeout
+		_ = stream.SetWriteDeadline(time.Now().Add(s.WriteTimeout))
 	}
-	defer func() {
-		// drop event references so evicted events can be collected
-		clear(pending)
-		v.pending = pending[:0]
-	}()
-	for _, m := range pending {
-		if err := stream.Send(m.ev); err != nil {
-			return err
+}
+
+// Publish stores a copy of ev in the event log and sends it to every client.
+// The server assigns the event id, replacing ev.ID. It returns the encoder's
+// error, such as sse.ErrInvalidField, for an event that cannot be sent, and
+// does not store it.
+func (s *Server) Publish(ev *sse.Event) error {
+	c := ev.Clone()
+	c.ID = nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// a stored event that cannot be encoded would end every stream that reaches it
+	if err := s.check.Encode(c); err != nil {
+		return err
+	}
+	s.elog.add(c)
+	for wake := range s.subs {
+		select {
+		case wake <- struct{}{}:
+		default:
 		}
-		v.lastid = m.id
 	}
 	return nil
 }
 
-// Publish stores a copy of ev in the event log and sends it to every client.
-// The server assigns the event id, replacing ev.ID.
-func (s *Server) Publish(ev *sse.Event) {
-	c := ev.Clone()
-	s.elog.add(c)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, v := range s.subs {
-		v.notify()
-	}
+// Close ends every stream and makes ServeHTTP answer 503 Service Unavailable,
+// so clients reconnect elsewhere. http.Server.Shutdown waits for streams to
+// end, so register it first:
+//
+//	httpServer.RegisterOnShutdown(es.Close)
+func (s *Server) Close() {
+	s.closeOnce.Do(func() { close(s.done) })
 }

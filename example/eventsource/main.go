@@ -14,7 +14,9 @@ func main() {
 	srv := eventsource.NewServer(1000)
 	go func() {
 		for range time.Tick(time.Second) {
-			srv.Publish(&sse.Event{Event: "ping", Data: []byte("foo")})
+			if err := srv.Publish(&sse.Event{Event: "ping", Data: []byte("foo")}); err != nil {
+				log.Println("publish:", err)
+			}
 		}
 	}()
 	go func() {

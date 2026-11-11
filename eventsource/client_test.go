@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -205,9 +207,10 @@ func TestClientResumesFromServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	es.Publish(&sse.Event{Data: []byte("0")})
+	require.NoError(t, es.Publish(&sse.Event{Data: []byte("0")}))
 	c := eventsource.Client{Reconnect: func(eventsource.Attempt) (time.Duration, bool) {
-		es.Publish(&sse.Event{Data: []byte("1")}) // published while disconnected
+		// published while disconnected
+		assert.NoError(t, es.Publish(&sse.Event{Data: []byte("1")}))
 		return 0, true
 	}}
 	var got []string
@@ -219,4 +222,117 @@ func TestClientResumesFromServer(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []string{"0", "1"}, got)
+}
+
+// Last-Event-ID follows the stream: the caller's header is the starting point,
+// an empty id clears it, and an id net/http cannot send is ignored.
+func TestClientLastEventID(t *testing.T) {
+	for name, tc := range map[string]struct {
+		initial string
+		ids     []string // id sent by each connection in turn
+		want    []string // Last-Event-ID header received by each connection
+	}{
+		"callerHeaderIsKept":     {initial: "42", ids: []string{"", ""}, want: []string{"42", "42", "42"}},
+		"resetClearsCallerValue": {initial: "42", ids: []string{"reset", "7"}, want: []string{"42", "", "7"}},
+		"controlCharIgnored":     {ids: []string{"5", "a\x01b"}, want: []string{"", "5", "5"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			var got []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				n := len(got)
+				got = append(got, r.Header.Get("Last-Event-ID"))
+				mu.Unlock()
+				stream, _ := sse.Upgrade(w, r)
+				ev := &sse.Event{Data: []byte("x")}
+				if n < len(tc.ids) {
+					switch id := tc.ids[n]; id {
+					case "":
+					case "reset":
+						ev.ID = []byte{}
+					default:
+						ev.ID = []byte(id)
+					}
+				}
+				_ = stream.Send(ev)
+			}))
+			defer srv.Close()
+
+			req := request(t, srv.URL)
+			if tc.initial != "" {
+				req.Header.Set("Last-Event-ID", tc.initial)
+			}
+			var seen []string
+			c := eventsource.Client{Reconnect: func(a eventsource.Attempt) (time.Duration, bool) {
+				seen = append(seen, a.LastEventID)
+				return 0, len(seen) < len(tc.want)
+			}}
+			for _, err := range c.Events(t.Context(), req) {
+				require.NoError(t, err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, tc.want, got)
+			// the policy sees the id each following request sends
+			assert.Equal(t, tc.want[1:], seen[:len(tc.want)-1])
+		})
+	}
+}
+
+// A stream that carried only keep-alives was still a working connection, so
+// its end does not count toward the backoff.
+func TestClientEstablishedStreamResetsFailures(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stream, _ := sse.Upgrade(w, r)
+		_ = stream.Comment("")
+	}))
+	defer srv.Close()
+
+	var failures []int
+	c := eventsource.Client{Reconnect: func(a eventsource.Attempt) (time.Duration, bool) {
+		failures = append(failures, a.Failures)
+		return 0, len(failures) < 3
+	}}
+	for _, err := range c.Events(t.Context(), request(t, srv.URL)) {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, []int{1, 1, 1}, failures)
+}
+
+// A request net/http refuses to send fails the same way every time, so the
+// default policy reports it instead of retrying forever.
+func TestClientUnsendableRequestStops(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var errs []error
+	var c eventsource.Client
+	// no scheme: "localhost" parses as the scheme
+	for _, err := range c.Events(ctx, request(t, "localhost:8080/sse")) {
+		errs = append(errs, err)
+	}
+	require.Len(t, errs, 1)
+	require.Error(t, errs[0])
+}
+
+// Backoff stays within its bounds for inputs that used to overflow or panic.
+func TestBackoffBounds(t *testing.T) {
+	a := eventsource.Attempt{Err: io.EOF, Failures: 100}
+	for name, tc := range map[string]struct {
+		initial, maxDelay, retry time.Duration
+		lo, hi                   time.Duration
+	}{
+		"doublingStopsAtMax": {initial: time.Hour, maxDelay: math.MaxInt64, lo: math.MaxInt64 / 5 * 4, hi: math.MaxInt64},
+		"negativeInitial":    {initial: -time.Second, maxDelay: time.Minute, lo: 0, hi: 0},
+		// a server may ask for a longer wait than maxDelay
+		"serverRetryAboveMax": {initial: time.Second, maxDelay: time.Minute, retry: time.Hour, lo: 48 * time.Minute, hi: time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a.Retry = tc.retry
+			d, ok := eventsource.Backoff(tc.initial, tc.maxDelay)(a)
+			require.True(t, ok)
+			assert.GreaterOrEqual(t, d, tc.lo)
+			assert.LessOrEqual(t, d, tc.hi)
+		})
+	}
 }
