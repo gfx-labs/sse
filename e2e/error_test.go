@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gfx-labs/sse"
 	"github.com/gfx-labs/sse/eventsource"
@@ -96,11 +97,33 @@ func TestStreamContextCancelled(t *testing.T) {
 
 // --- Upgrade streaming not supported ---
 
+// Nothing is written, so the caller can still answer with an error status.
 func TestUpgradeStreamingNotSupported(t *testing.T) {
 	w := &noFlushResponseWriter{header: http.Header{}}
 	r := httptest.NewRequest("GET", "/", nil)
 	_, err := sse.Upgrade(w, r)
 	require.ErrorIs(t, err, sse.ErrStreamingNotSupported)
+	assert.Zero(t, w.status)
+	assert.Empty(t, w.header)
+}
+
+// http.Server.WriteTimeout covers the whole response, so Upgrade must clear it.
+func TestUpgradeClearsServerWriteTimeout(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stream, err := sse.Upgrade(w, r)
+		if !assert.NoError(t, err) {
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+		assert.NoError(t, stream.Send(&sse.Event{Data: []byte("late")}))
+	}))
+	srv.Config.WriteTimeout = 50 * time.Millisecond
+	srv.Start()
+	defer srv.Close()
+
+	got := collect(t, eventsource.Client{Reconnect: eventsource.NoReconnect}, srv.URL, -1)
+	require.Len(t, got, 1)
+	assert.Equal(t, "late", string(got[0].Data))
 }
 
 // Middleware that wraps the ResponseWriter but exposes Unwrap must still stream.
@@ -129,11 +152,12 @@ func (u *unwrapWriter) Unwrap() http.ResponseWriter { return u.ResponseWriter }
 
 type noFlushResponseWriter struct {
 	header http.Header
+	status int
 }
 
 func (n *noFlushResponseWriter) Header() http.Header         { return n.header }
 func (n *noFlushResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (n *noFlushResponseWriter) WriteHeader(int)             {}
+func (n *noFlushResponseWriter) WriteHeader(code int)        { n.status = code }
 
 // --- UTF-8 validation ---
 
@@ -165,8 +189,10 @@ func TestEncoderDataLineBreaks(t *testing.T) {
 
 func TestEncoderRejectsLineBreaks(t *testing.T) {
 	for name, ev := range map[string]*sse.Event{
-		"event":      {Event: "a\ndata: injected"},
-		"id":         {ID: []byte("1\r")},
+		"event": {Event: "a\ndata: injected"},
+		"id":    {ID: []byte("1\r")},
+		// clients ignore an id containing NUL
+		"idNUL":      {ID: []byte("a\x00b")},
 		"fieldValue": {Fields: map[string][]byte{"k": []byte("a\nb")}},
 		"fieldName":  {Fields: map[string][]byte{"a:b": []byte("v")}},
 		"emptyName":  {Fields: map[string][]byte{"": []byte("v")}},

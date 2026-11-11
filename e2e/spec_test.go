@@ -116,6 +116,15 @@ func TestSpecRetryField(t *testing.T) {
 	assert.Empty(t, evs[0].Fields)
 }
 
+// A retry too large for a time.Duration is clamped, not wrapped to a negative or small delay.
+func TestSpecRetryFieldOverflow(t *testing.T) {
+	for _, v := range []string{"10000000000000", "99999999999999999999999999"} {
+		evs := decode(t, "retry: "+v+"\ndata: x\n\n")
+		require.Len(t, evs, 1)
+		assert.Greater(t, evs[0].Retry, 290*365*24*time.Hour, v)
+	}
+}
+
 // --- Multi-line data (spec section 9.2.4) ---
 
 func TestSpecMultiLineData(t *testing.T) {

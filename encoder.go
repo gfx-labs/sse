@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"bytes"
 	"io"
 	"strconv"
 	"strings"
@@ -21,7 +22,11 @@ func NewEncoder(w io.Writer, opts ...Option) *Encoder {
 
 // Encode writes ev. Data is split into one data line per line of input, and a
 // nil Data writes no data line. A non-nil empty ID writes a bare id field, which
-// resets the client's last event id.
+// resets the client's last event id. A Retry below one millisecond is written as
+// zero.
+//
+// It returns ErrInvalidField, and writes nothing, for a line break in a field
+// name, field value, id or comment, and for a NUL in the id.
 func (e *Encoder) Encode(ev *Event) error {
 	b := e.buf[:0]
 	var err error
@@ -52,6 +57,10 @@ func (e *Encoder) Encode(ev *Event) error {
 		b = appendData(b, ev.Data)
 	}
 	if ev.ID != nil {
+		// clients ignore an id containing NUL, so it would never take effect
+		if bytes.IndexByte(ev.ID, 0) >= 0 {
+			return ErrInvalidField
+		}
 		if b, err = appendFieldTo(e, b, "id", ev.ID); err != nil {
 			return err
 		}

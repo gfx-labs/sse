@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/gfx-labs/sse"
@@ -59,4 +60,26 @@ func TestConnectErrors(t *testing.T) {
 	require.True(t, ok, "%v", err)
 	assert.Equal(t, http.StatusForbidden, se.Code)
 	assert.Contains(t, string(se.Body), "nope")
+}
+
+// Browsers accept an event stream whose Content-Type has a malformed parameter.
+func TestConnectContentTypeParameters(t *testing.T) {
+	for _, ct := range []string{"Text/Event-Stream; charset=utf-8", "text/event-stream; charset"} {
+		err := connectErr(t, func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Content-Type", ct) })
+		assert.NoError(t, err, ct)
+	}
+}
+
+// A Request literal has no header map for Connect to set its headers in.
+func TestConnectRequestWithoutHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
+		_, _ = sse.Upgrade(w, r)
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	resp, err := sse.Connect(nil, (&http.Request{Method: "GET", URL: u}).WithContext(t.Context()))
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 }

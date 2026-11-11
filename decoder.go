@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"iter"
+	"math"
 	"time"
 )
 
@@ -73,8 +74,8 @@ func (d *Decoder) Decode(e *Event) error {
 				e.ID = append(e.idBuf[:0], value...)
 			}
 		case "retry":
-			if ms, ok := parseDigits(value); ok {
-				e.Retry = time.Duration(ms) * time.Millisecond
+			if d, ok := parseRetry(value); ok {
+				e.Retry = d
 			}
 		default:
 			if e.Fields == nil {
@@ -130,16 +131,23 @@ func appendReuse(xs [][]byte, v []byte) [][]byte {
 	return append(xs, append([]byte(nil), v...))
 }
 
-func parseDigits(b []byte) (int64, bool) {
-	if len(b) == 0 || len(b) > 15 {
+// maxRetryMS is the largest retry value in milliseconds that fits a time.Duration.
+const maxRetryMS = int64(math.MaxInt64 / time.Millisecond)
+
+// parseRetry parses a retry value, which must be all digits. Values too large
+// for a time.Duration become the largest whole number of milliseconds.
+func parseRetry(b []byte) (time.Duration, bool) {
+	if len(b) == 0 {
 		return 0, false
 	}
-	var n int64
+	var ms int64
 	for _, c := range b {
 		if c < '0' || c > '9' {
 			return 0, false
 		}
-		n = n*10 + int64(c-'0')
+		if ms < maxRetryMS {
+			ms = ms*10 + int64(c-'0')
+		}
 	}
-	return n, true
+	return time.Duration(min(ms, maxRetryMS)) * time.Millisecond, true
 }
